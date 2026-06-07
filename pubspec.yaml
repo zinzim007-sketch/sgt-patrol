@@ -1,0 +1,36 @@
+name: sgt_patrol
+description: SGT Patrol — drone patrol operator app
+publish_to: 'none'
+version: 1.0.0+1
+ 
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+ 
+dependencies:
+  flutter:
+    sdk: flutter
+ 
+  # State management
+  provider: ^6.1.2
+ 
+  # Maps
+  google_maps_flutter: ^2.6.0
+ 
+  # Navigation
+  go_router: ^13.2.0
+ 
+  # Icons
+  flutter_tabler_icons: ^1.0.0
+ 
+  # Utilities
+  intl: ^0.19.0
+ 
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+ 
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
