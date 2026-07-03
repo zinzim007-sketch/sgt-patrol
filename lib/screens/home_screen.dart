@@ -1,20 +1,28 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../theme/theme.dart';
 import '../providers/drone_provider.dart';
 import '../providers/mission_provider.dart';
+import '../providers/detection_provider.dart';
 import '../models/patrol_route.dart';
- 
+import '../models/detection_alert.dart';
+import '../models/site_config.dart';
+
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
- 
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Column(
         children: [
           _TopBar(),
-          _VideoFeed(),
+          Expanded(
+            flex: 3,
+            child: _VideoFeed(),
+          ),
+
           _TelemetryBar(),
           Expanded(
             child: SingleChildScrollView(
@@ -22,6 +30,8 @@ class HomeScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  _AlertPanel(),
+                  const SizedBox(height: 12),
                   _MissionCard(),
                   const SizedBox(height: 12),
                   _ActionButtons(),
@@ -34,15 +44,17 @@ class HomeScreen extends StatelessWidget {
     );
   }
 }
- 
+
 // -------------------------------------------------------------------------
 // Top bar
 // -------------------------------------------------------------------------
- 
+
 class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
+    final detection = context.watch<DetectionProvider>();
+
     return SafeArea(
       bottom: false,
       child: Container(
@@ -50,41 +62,83 @@ class _TopBar extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            const Text(
-              'SGT PATROL',
+            const Text('SGT PATROL',
               style: TextStyle(
-                color: SGTColors.blueMuted,
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 2.0,
+                color: SGTColors.blueMuted, fontSize: 11,
+                fontWeight: FontWeight.w500, letterSpacing: 2.0)),
+            const SizedBox(width: 8),
+            // Site type badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: SGTColors.surfaceRaised,
+                borderRadius: BorderRadius.circular(3),
+                border: Border.all(color: SGTColors.border, width: 0.5),
               ),
+              child: Text(
+                detection.siteConfig.siteType.name.toUpperCase(),
+                style: const TextStyle(
+                  fontSize: 8, color: SGTColors.textMuted, letterSpacing: 1.0)),
             ),
             const Spacer(),
+            // Critical alert badge
+            if (detection.hasCritical)
+              Container(
+                margin: const EdgeInsets.only(right: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: SGTColors.dangerBg,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: SGTColors.danger, width: 0.5),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.crisis_alert, size: 10, color: SGTColors.danger),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${detection.criticalAlerts.length} CRITICAL',
+                      style: const TextStyle(
+                        fontSize: 10, color: SGTColors.danger,
+                        fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+                  ],
+                ),
+              )
+            else if (detection.unreadCount > 0)
+              Container(
+                margin: const EdgeInsets.only(right: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2a1f00),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: SGTColors.warning, width: 0.5),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber, size: 10, color: SGTColors.warning),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${detection.unreadCount} ALERT${detection.unreadCount > 1 ? 'S' : ''}',
+                      style: const TextStyle(
+                        fontSize: 10, color: SGTColors.warning,
+                        fontWeight: FontWeight.w500, letterSpacing: 0.8)),
+                  ],
+                ),
+              ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: drone.isConnected
-                    ? SGTColors.onlineBg
-                    : SGTColors.dangerBg,
+                color: drone.isConnected ? SGTColors.onlineBg : SGTColors.dangerBg,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
                   color: drone.isConnected
-                      ? const Color(0xFF1a5c35)
-                      : const Color(0xFF5a1a1a),
-                  width: 0.5,
-                ),
+                      ? const Color(0xFF1a5c35) : const Color(0xFF5a1a1a),
+                  width: 0.5),
               ),
               child: Text(
                 drone.isConnected ? 'LIVE' : 'OFFLINE',
                 style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 1.0,
-                  color: drone.isConnected
-                      ? SGTColors.online
-                      : SGTColors.danger,
-                ),
-              ),
+                  fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
+                  color: drone.isConnected ? SGTColors.online : SGTColors.danger)),
             ),
           ],
         ),
@@ -92,180 +146,187 @@ class _TopBar extends StatelessWidget {
     );
   }
 }
- 
+
 // -------------------------------------------------------------------------
-// Video feed area
+// Video feed
 // -------------------------------------------------------------------------
- 
+
 class _VideoFeed extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
+    final detection = context.watch<DetectionProvider>();
+
     return Container(
-      height: 200,
+      
       color: SGTColors.navyDeep,
       child: Stack(
+        fit: StackFit.expand,
         children: [
-          // Placeholder — replace with DJI video texture when SDK is ready
-          const Center(
-            child: Text(
-              'CAMERA FEED',
-              style: TextStyle(
-                color: SGTColors.textMuted,
-                fontSize: 11,
-                letterSpacing: 2.0,
-              ),
-            ),
-          ),
-          // Corner brackets
-          ..._cornerBrackets(),
-          // Status message
-          Positioned(
-            bottom: 10,
-            left: 14,
-            child: Text(
-              drone.statusMessage,
-              style: const TextStyle(
-                color: SGTColors.textSecondary,
-                fontSize: 10,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          // REC indicator
-          if (drone.isConnected)
-            Positioned(
-              top: 10,
-              right: 14,
-              child: Row(
+          if (detection.currentFrameBase64 != null)
+            Image.memory(
+              base64Decode(detection.currentFrameBase64!),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+            )
+          else
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 7,
-                    height: 7,
-                    decoration: const BoxDecoration(
-                      color: SGTColors.danger,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Text(
-                    'REC',
+                  const Text('CAMERA FEED',
                     style: TextStyle(
-                      color: SGTColors.danger,
-                      fontSize: 9,
-                      letterSpacing: 1.0,
-                    ),
-                  ),
+                      color: SGTColors.textMuted, fontSize: 11, letterSpacing: 2.0)),
+                  const SizedBox(height: 6),
+                  Text(
+                    detection.isDetecting
+                        ? 'Connecting to detection server...'
+                        : 'Run detector.py then press START DETECT',
+                    style: const TextStyle(color: SGTColors.textMuted, fontSize: 10)),
                 ],
               ),
             ),
+          ..._cornerBrackets(),
+          Positioned(
+            bottom: 10, left: 14,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: SGTColors.navyDeep.withOpacity(0.7),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                detection.isDetecting
+                    ? detection.statusMessage : drone.statusMessage,
+                style: const TextStyle(color: SGTColors.textSecondary, fontSize: 10)),
+            )),
+          if (drone.isConnected)
+            Positioned(
+              top: 10, right: 14,
+              child: Row(
+                children: [
+                  Container(
+                    width: 7, height: 7,
+                    decoration: const BoxDecoration(
+                      color: SGTColors.danger, shape: BoxShape.circle)),
+                  const SizedBox(width: 4),
+                  const Text('REC',
+                    style: TextStyle(
+                      color: SGTColors.danger, fontSize: 9, letterSpacing: 1.0)),
+                ],
+              )),
+          Positioned(
+            bottom: 10, right: 14,
+            child: GestureDetector(
+              onTap: () {
+                if (detection.isDetecting) {
+                  detection.disconnect();
+                } else {
+                  detection.connect(
+                    lat: drone.latitude,
+                    lng: drone.longitude,
+                  );
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: detection.isDetecting
+                      ? SGTColors.onlineBg : SGTColors.surfaceRaised,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: detection.isDetecting
+                        ? SGTColors.online : SGTColors.border,
+                    width: 0.5),
+                ),
+                child: Text(
+                  detection.isDetecting ? 'STOP DETECT' : 'START DETECT',
+                  style: TextStyle(
+                    fontSize: 9, letterSpacing: 1.0,
+                    color: detection.isDetecting
+                        ? SGTColors.online : SGTColors.textSecondary)),
+              ),
+            )),
         ],
       ),
     );
   }
- 
+
   List<Widget> _cornerBrackets() {
     const color = Color(0xFF1e3a6a);
     const size = 14.0;
-    const thickness = 1.0;
     const offset = 10.0;
- 
     return [
       Positioned(top: offset, left: offset,
-        child: _Bracket(size: size, thickness: thickness, color: color, top: true, left: true)),
+        child: _Bracket(size: size, color: color, top: true, left: true)),
       Positioned(top: offset, right: offset,
-        child: _Bracket(size: size, thickness: thickness, color: color, top: true, left: false)),
+        child: _Bracket(size: size, color: color, top: true, left: false)),
       Positioned(bottom: offset, left: offset,
-        child: _Bracket(size: size, thickness: thickness, color: color, top: false, left: true)),
+        child: _Bracket(size: size, color: color, top: false, left: true)),
       Positioned(bottom: offset, right: offset,
-        child: _Bracket(size: size, thickness: thickness, color: color, top: false, left: false)),
+        child: _Bracket(size: size, color: color, top: false, left: false)),
     ];
   }
 }
- 
+
 class _Bracket extends StatelessWidget {
-  final double size, thickness;
+  final double size;
   final Color color;
   final bool top, left;
- 
-  const _Bracket({
-    required this.size, required this.thickness,
-    required this.color, required this.top, required this.left,
-  });
- 
+  const _Bracket({required this.size, required this.color,
+    required this.top, required this.left});
+
   @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CustomPaint(
-        painter: _BracketPainter(color, thickness, top, left),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => SizedBox(
+    width: size, height: size,
+    child: CustomPaint(painter: _BracketPainter(color, top, left)));
 }
- 
+
 class _BracketPainter extends CustomPainter {
   final Color color;
-  final double thickness;
   final bool top, left;
- 
-  _BracketPainter(this.color, this.thickness, this.top, this.left);
- 
+  _BracketPainter(this.color, this.top, this.left);
+
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = thickness
-      ..style = PaintingStyle.stroke;
- 
+    final paint = Paint()..color = color..strokeWidth = 1.0..style = PaintingStyle.stroke;
     final path = Path();
     if (top && left) {
-      path.moveTo(0, size.height);
-      path.lineTo(0, 0);
-      path.lineTo(size.width, 0);
+      path.moveTo(0, size.height); path.lineTo(0, 0); path.lineTo(size.width, 0);
     } else if (top && !left) {
-      path.moveTo(0, 0);
-      path.lineTo(size.width, 0);
-      path.lineTo(size.width, size.height);
+      path.moveTo(0, 0); path.lineTo(size.width, 0); path.lineTo(size.width, size.height);
     } else if (!top && left) {
-      path.moveTo(0, 0);
-      path.lineTo(0, size.height);
-      path.lineTo(size.width, size.height);
+      path.moveTo(0, 0); path.lineTo(0, size.height); path.lineTo(size.width, size.height);
     } else {
-      path.moveTo(0, size.height);
-      path.lineTo(size.width, size.height);
-      path.lineTo(size.width, 0);
+      path.moveTo(0, size.height); path.lineTo(size.width, size.height); path.lineTo(size.width, 0);
     }
     canvas.drawPath(path, paint);
   }
- 
+
   @override
   bool shouldRepaint(_BracketPainter old) => false;
 }
- 
+
 // -------------------------------------------------------------------------
 // Telemetry bar
 // -------------------------------------------------------------------------
- 
+
 class _TelemetryBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
- 
     final cells = [
-      (label: 'ALT', value: '${drone.altitude.toStringAsFixed(1)}', unit: 'm'),
-      (label: 'SPD', value: '${drone.speed.toStringAsFixed(1)}', unit: 'm/s'),
-      (label: 'BAT', value: '${drone.batteryLevel}', unit: '%',),
+      (label: 'ALT', value: drone.altitude.toStringAsFixed(1), unit: 'm'),
+      (label: 'SPD', value: drone.speed.toStringAsFixed(1), unit: 'm/s'),
+      (label: 'BAT', value: '${drone.batteryLevel}', unit: '%'),
       (label: 'GPS', value: '${drone.gpsSatellites}', unit: 'sats'),
     ];
- 
+
     return Container(
       decoration: const BoxDecoration(
         color: SGTColors.surface,
         border: Border.symmetric(
-          horizontal: BorderSide(color: SGTColors.border, width: 0.5),
-        ),
+          horizontal: BorderSide(color: SGTColors.border, width: 0.5)),
       ),
       child: Row(
         children: cells.map((cell) {
@@ -274,39 +335,20 @@ class _TelemetryBar extends StatelessWidget {
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 10),
               decoration: const BoxDecoration(
-                border: Border(
-                  right: BorderSide(color: SGTColors.border, width: 0.5),
-                ),
-              ),
+                border: Border(right: BorderSide(color: SGTColors.border, width: 0.5))),
               child: Column(
                 children: [
-                  Text(
-                    cell.label,
+                  Text(cell.label,
                     style: const TextStyle(
-                      fontSize: 9,
-                      color: SGTColors.textMuted,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
+                      fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.2)),
                   const SizedBox(height: 3),
-                  Text(
-                    cell.value,
+                  Text(cell.value,
                     style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: isBatLow
-                          ? SGTColors.danger
-                          : SGTColors.textPrimary,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                  Text(
-                    cell.unit,
-                    style: const TextStyle(
-                      fontSize: 9,
-                      color: SGTColors.textMuted,
-                    ),
-                  ),
+                      fontSize: 16, fontWeight: FontWeight.w500,
+                      color: isBatLow ? SGTColors.danger : SGTColors.textPrimary,
+                      fontFeatures: const [FontFeature.tabularFigures()])),
+                  Text(cell.unit,
+                    style: const TextStyle(fontSize: 9, color: SGTColors.textMuted)),
                 ],
               ),
             ),
@@ -316,16 +358,294 @@ class _TelemetryBar extends StatelessWidget {
     );
   }
 }
- 
+
+// -------------------------------------------------------------------------
+// Alert panel — tiered by level
+// -------------------------------------------------------------------------
+
+class _AlertPanel extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final detection = context.watch<DetectionProvider>();
+    if (detection.activeAlerts.isEmpty) return const SizedBox.shrink();
+
+    // Split by level
+    final critical = detection.activeAlerts.where((a) => a.isCritical).toList();
+    final alertLevel = detection.activeAlerts.where((a) => a.isAlert).toList();
+    final watch = detection.activeAlerts.where((a) => a.isWatch).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('ALERTS',
+              style: TextStyle(
+                fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.5)),
+            const Spacer(),
+            GestureDetector(
+              onTap: detection.clearAllAlerts,
+              child: const Text('CLEAR ALL',
+                style: TextStyle(
+                  fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.0))),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        // Critical first
+        ...critical.map((a) => _AlertCard(alert: a)),
+
+        // Then alert level
+        ...alertLevel.map((a) => _AlertCard(alert: a)),
+
+        // Then watch
+        ...watch.map((a) => _AlertCard(alert: a)),
+
+        const SizedBox(height: 4),
+      ],
+    );
+  }
+}
+
+class _AlertCard extends StatelessWidget {
+  final DetectionAlert alert;
+  const _AlertCard({required this.alert});
+
+  Color get _levelColor {
+    switch (alert.level) {
+      case AlertLevel.critical: return SGTColors.danger;
+      case AlertLevel.alert: return SGTColors.warning;
+      case AlertLevel.watch: return SGTColors.blue;
+      case AlertLevel.log: return SGTColors.textMuted;
+    }
+  }
+
+  Color get _levelBg {
+    switch (alert.level) {
+      case AlertLevel.critical: return SGTColors.dangerBg;
+      case AlertLevel.alert: return const Color(0xFF2a1f00);
+      case AlertLevel.watch: return const Color(0xFF0d1a2a);
+      case AlertLevel.log: return SGTColors.surface;
+    }
+  }
+
+  Color get _levelBorder {
+    switch (alert.level) {
+      case AlertLevel.critical: return const Color(0xFF5a1a1a);
+      case AlertLevel.alert: return const Color(0xFF5a3a00);
+      case AlertLevel.watch: return const Color(0xFF1a3a5a);
+      case AlertLevel.log: return SGTColors.border;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final detection = context.read<DetectionProvider>();
+    final drone = context.read<DroneProvider>();
+    final result = alert.engineResult;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _levelBg,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: _levelBorder, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header row
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _levelColor.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(3),
+                  border: Border.all(color: _levelColor, width: 0.5),
+                ),
+                child: Text(
+                  alert.levelLabel,
+                  style: TextStyle(
+                    fontSize: 9, color: _levelColor,
+                    fontWeight: FontWeight.w600, letterSpacing: 1.0)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(result.title,
+                  style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w500,
+                    color: _levelColor)),
+              ),
+              Text(alert.timeString,
+                style: const TextStyle(
+                  fontSize: 10, color: SGTColors.textMuted,
+                  fontFeatures: [FontFeature.tabularFigures()])),
+            ],
+          ),
+          const SizedBox(height: 6),
+
+          // Description
+          Text(result.description,
+            style: const TextStyle(fontSize: 11, color: SGTColors.textSecondary)),
+
+          // GPS if available
+          if (alert.latitude != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'GPS: ${alert.latitude!.toStringAsFixed(5)}, ${alert.longitude!.toStringAsFixed(5)}',
+              style: const TextStyle(fontSize: 10, color: SGTColors.textMuted)),
+          ],
+
+          // Action label
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              result.actionLabel.toUpperCase(),
+              style: TextStyle(
+                fontSize: 9, color: _levelColor.withOpacity(0.7),
+                letterSpacing: 1.0)),
+          ),
+
+          // Action buttons
+          Row(
+            children: [
+              // Call authorities — only on alert/critical
+              if (result.showCallAuthorities)
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      detection.markReportedToAuthorities(alert.id);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Authorities notified — TODO: wire up real call'),
+                          backgroundColor: SGTColors.danger,
+                        ));
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: SGTColors.danger.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: SGTColors.danger, width: 0.5),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.local_police_outlined, size: 12, color: SGTColors.danger),
+                          SizedBox(width: 6),
+                          Text('CALL AUTHORITIES',
+                            style: TextStyle(
+                              fontSize: 10, letterSpacing: 0.8,
+                              color: SGTColors.danger, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (result.showCallAuthorities && result.showDispatchDrone)
+                const SizedBox(width: 8),
+
+              // Dispatch drone — on alert/critical
+              if (result.showDispatchDrone)
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      detection.markDroneDispatched(alert.id);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Drone dispatching to location — TODO: wire up flight command'),
+                        ));
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: SGTColors.blue.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: SGTColors.blue, width: 0.5),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.flight, size: 12, color: SGTColors.blueMuted),
+                          SizedBox(width: 6),
+                          Text('DISPATCH DRONE',
+                            style: TextStyle(
+                              fontSize: 10, letterSpacing: 0.8,
+                              color: SGTColors.blueMuted, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // Escalate button for watch level
+              if (alert.isWatch) ...[
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => detection.operatorEscalate(
+                      alert.id,
+                      lat: drone.latitude,
+                      lng: drone.longitude,
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: SGTColors.warning.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: SGTColors.warning, width: 0.5),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.arrow_upward, size: 12, color: SGTColors.warning),
+                          SizedBox(width: 6),
+                          Text('ESCALATE',
+                            style: TextStyle(
+                              fontSize: 10, letterSpacing: 0.8,
+                              color: SGTColors.warning, fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+
+              // Dismiss — always shown
+              GestureDetector(
+                onTap: () => detection.dismissAlert(alert.id),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: SGTColors.surfaceRaised,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: SGTColors.border, width: 0.5),
+                  ),
+                  child: const Text('DISMISS',
+                    style: TextStyle(
+                      fontSize: 10, letterSpacing: 0.8, color: SGTColors.textSecondary)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // -------------------------------------------------------------------------
 // Mission card
 // -------------------------------------------------------------------------
- 
+
 class _MissionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mission = context.watch<MissionProvider>();
- 
+
     final statusColor = switch (mission.state) {
       MissionState.ready => SGTColors.online,
       MissionState.executing => SGTColors.warning,
@@ -333,7 +653,7 @@ class _MissionCard extends StatelessWidget {
       MissionState.error => SGTColors.danger,
       _ => SGTColors.textMuted,
     };
- 
+
     final statusLabel = switch (mission.state) {
       MissionState.idle => 'IDLE',
       MissionState.uploading => 'UPLOADING',
@@ -342,18 +662,12 @@ class _MissionCard extends StatelessWidget {
       MissionState.complete => 'COMPLETE',
       MissionState.error => 'ERROR',
     };
- 
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'ACTIVE MISSION',
-          style: TextStyle(
-            fontSize: 9,
-            color: SGTColors.textMuted,
-            letterSpacing: 1.5,
-          ),
-        ),
+        const Text('ACTIVE MISSION',
+          style: TextStyle(fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.5)),
         const SizedBox(height: 8),
         Container(
           padding: const EdgeInsets.all(14),
@@ -368,24 +682,16 @@ class _MissionCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Farm perimeter — north',
+                    const Text('Farm perimeter — north',
                       style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: SGTColors.textPrimary,
-                      ),
-                    ),
+                        fontSize: 13, fontWeight: FontWeight.w500,
+                        color: SGTColors.textPrimary)),
                     const SizedBox(height: 4),
                     Text(
                       mission.state == MissionState.executing
                           ? 'Waypoint ${mission.currentWaypoint} / ${mission.totalWaypoints}'
                           : '4 waypoints · 5 m/s',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: SGTColors.textMuted,
-                      ),
-                    ),
+                      style: const TextStyle(fontSize: 11, color: SGTColors.textMuted)),
                   ],
                 ),
               ),
@@ -396,76 +702,54 @@ class _MissionCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(4),
                   border: Border.all(color: statusColor.withOpacity(0.4), width: 0.5),
                 ),
-                child: Text(
-                  statusLabel,
+                child: Text(statusLabel,
                   style: TextStyle(
-                    fontSize: 10,
-                    color: statusColor,
-                    letterSpacing: 0.8,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                    fontSize: 10, color: statusColor,
+                    letterSpacing: 0.8, fontWeight: FontWeight.w500)),
               ),
             ],
           ),
         ),
         const SizedBox(height: 8),
-        // Mission status message
-        Text(
-          mission.statusMessage,
-          style: const TextStyle(
-            fontSize: 11,
-            color: SGTColors.textSecondary,
-          ),
-        ),
+        Text(mission.statusMessage,
+          style: const TextStyle(fontSize: 11, color: SGTColors.textSecondary)),
       ],
     );
   }
 }
- 
+
 // -------------------------------------------------------------------------
 // Action buttons
 // -------------------------------------------------------------------------
- 
+
 class _ActionButtons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
     final mission = context.watch<MissionProvider>();
- 
+
     return Column(
       children: [
         Row(
           children: [
-            Expanded(
-              child: _SGTButton(
-                label: 'UPLOAD',
-                icon: Icons.upload_outlined,
-                enabled: drone.isConnected && mission.canUpload,
-                onTap: () => mission.uploadMission(
-                  PatrolRoute.defaultRoute,
-                  useMock: drone.useMock,
-                ),
-              ),
-            ),
+            Expanded(child: _SGTButton(
+              label: 'UPLOAD', icon: Icons.upload_outlined,
+              enabled: drone.isConnected && mission.canUpload,
+              onTap: () => mission.uploadMission(
+                PatrolRoute.defaultRoute, useMock: drone.useMock),
+            )),
             const SizedBox(width: 8),
-            Expanded(
-              child: _SGTButton(
-                label: 'START PATROL',
-                icon: Icons.play_arrow_outlined,
-                enabled: drone.isConnected && mission.canStart,
-                onTap: () => mission.startMission(useMock: drone.useMock),
-              ),
-            ),
+            Expanded(child: _SGTButton(
+              label: 'START PATROL', icon: Icons.play_arrow_outlined,
+              enabled: drone.isConnected && mission.canStart,
+              onTap: () => mission.startMission(useMock: drone.useMock),
+            )),
             const SizedBox(width: 8),
-            Expanded(
-              child: _SGTButton(
-                label: 'STOP',
-                icon: Icons.stop_outlined,
-                enabled: drone.isConnected && mission.canStop,
-                onTap: () => mission.stopMission(useMock: drone.useMock),
-              ),
-            ),
+            Expanded(child: _SGTButton(
+              label: 'STOP', icon: Icons.stop_outlined,
+              enabled: drone.isConnected && mission.canStop,
+              onTap: () => mission.stopMission(useMock: drone.useMock),
+            )),
           ],
         ),
         const SizedBox(height: 8),
@@ -474,20 +758,16 @@ class _ActionButtons extends StatelessWidget {
     );
   }
 }
- 
+
 class _SGTButton extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool enabled;
   final VoidCallback onTap;
- 
-  const _SGTButton({
-    required this.label,
-    required this.icon,
-    required this.enabled,
-    required this.onTap,
-  });
- 
+
+  const _SGTButton({required this.label, required this.icon,
+    required this.enabled, required this.onTap});
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
@@ -499,48 +779,51 @@ class _SGTButton extends StatelessWidget {
           color: enabled ? SGTColors.navyLight : SGTColors.surface,
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
-            color: enabled ? SGTColors.borderLight : SGTColors.border,
-            width: 0.5,
-          ),
+            color: enabled ? SGTColors.borderLight : SGTColors.border, width: 0.5),
         ),
         child: Column(
           children: [
-            Icon(
-              icon,
-              size: 18,
-              color: enabled ? SGTColors.textPrimary : SGTColors.textMuted,
-            ),
+            Icon(icon, size: 18,
+              color: enabled ? SGTColors.textPrimary : SGTColors.textMuted),
             const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 9,
-                letterSpacing: 1.0,
-                fontWeight: FontWeight.w500,
-                color: enabled ? SGTColors.textPrimary : SGTColors.textMuted,
-              ),
-            ),
+            Text(label, style: TextStyle(
+              fontSize: 9, letterSpacing: 1.0, fontWeight: FontWeight.w500,
+              color: enabled ? SGTColors.textPrimary : SGTColors.textMuted)),
           ],
         ),
       ),
     );
   }
 }
- 
+
 class _PanicButton extends StatelessWidget {
   final DroneProvider drone;
   const _PanicButton({required this.drone});
- 
+
   @override
   Widget build(BuildContext context) {
+    final detection = context.read<DetectionProvider>();
+
     return GestureDetector(
+
       onTap: drone.isConnected
-          ? () => drone.returnToHome((success, message) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(message)),
-                );
-              })
+          ? () {
+              // Trigger critical alert
+              detection.triggerPanic(
+                lat: drone.latitude,
+                lng: drone.longitude,
+              );
+              // TODO: Fly drone TO the panic location, not home
+              // drone.flyTo(lat: panicLat, lng: panicLng);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('🚨 Panic triggered — drone dispatching to location'),
+                  backgroundColor: SGTColors.danger,
+                ));
+            }
           : null,
+
+      
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 14),
@@ -552,25 +835,15 @@ class _PanicButton extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.warning_amber_outlined,
-              size: 16,
+            Icon(Icons.crisis_alert, size: 16,
               color: drone.isConnected
-                  ? SGTColors.danger
-                  : SGTColors.danger.withOpacity(0.4),
-            ),
+                  ? SGTColors.danger : SGTColors.danger.withOpacity(0.4)),
             const SizedBox(width: 8),
-            Text(
-              'PANIC — RETURN HOME',
+            Text('PANIC — RETURN HOME',
               style: TextStyle(
-                fontSize: 11,
-                letterSpacing: 1.2,
-                fontWeight: FontWeight.w500,
+                fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w500,
                 color: drone.isConnected
-                    ? SGTColors.danger
-                    : SGTColors.danger.withOpacity(0.4),
-              ),
-            ),
+                    ? SGTColors.danger : SGTColors.danger.withOpacity(0.4))),
           ],
         ),
       ),

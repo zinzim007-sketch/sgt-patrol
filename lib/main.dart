@@ -1,27 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
- 
+
 import 'theme/theme.dart';
 import 'providers/drone_provider.dart';
 import 'providers/mission_provider.dart';
+import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/mission_screen.dart';
-//import 'screens/routes_screen.dart';
-//import 'screens/settings_screen.dart';
- 
+
 void main() {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => DroneProvider()..connect()),
+        ChangeNotifierProvider(create: (_) => DroneProvider()
+          .useMock = false  // use real PX4
+          ..connect()),,
         ChangeNotifierProvider(create: (_) => MissionProvider()),
+        ChangeNotifierProvider(create: (_) => DetectionProvider()),
       ],
       child: const SGTPatrolApp(),
     ),
   );
 }
- 
+
 final _router = GoRouter(
   initialLocation: '/',
   routes: [
@@ -36,10 +38,10 @@ final _router = GoRouter(
     ),
   ],
 );
- 
+
 class SGTPatrolApp extends StatelessWidget {
   const SGTPatrolApp({super.key});
- 
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp.router(
@@ -50,23 +52,22 @@ class SGTPatrolApp extends StatelessWidget {
     );
   }
 }
- 
-/// AppShell — persistent shell with bottom nav bar
+
 class AppShell extends StatelessWidget {
   final Widget child;
   const AppShell({super.key, required this.child});
- 
+
   @override
   Widget build(BuildContext context) {
     final location = GoRouterState.of(context).uri.toString();
- 
+
     final navItems = [
       (icon: Icons.flight, label: 'FLY', path: '/'),
       (icon: Icons.map_outlined, label: 'MISSION', path: '/mission'),
       (icon: Icons.route_outlined, label: 'ROUTES', path: '/routes'),
       (icon: Icons.settings_outlined, label: 'SETTINGS', path: '/settings'),
     ];
- 
+
     return Scaffold(
       body: child,
       bottomNavigationBar: Container(
@@ -86,25 +87,14 @@ class AppShell extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          item.icon,
-                          size: 20,
-                          color: isActive
-                              ? SGTColors.blueMuted
-                              : SGTColors.textMuted,
-                        ),
+                        Icon(item.icon, size: 20,
+                          color: isActive ? SGTColors.blueMuted : SGTColors.textMuted),
                         const SizedBox(height: 4),
-                        Text(
-                          item.label,
+                        Text(item.label,
                           style: TextStyle(
-                            fontSize: 9,
-                            letterSpacing: 1.0,
-                            fontWeight: FontWeight.w500,
-                            color: isActive
-                                ? SGTColors.blueMuted
-                                : SGTColors.textMuted,
-                          ),
-                        ),
+                            fontSize: 9, letterSpacing: 1.0, fontWeight: FontWeight.w500,
+                            color: isActive ? SGTColors.blueMuted : SGTColors.textMuted,
+                          )),
                       ],
                     ),
                   ),
@@ -117,8 +107,7 @@ class AppShell extends StatelessWidget {
     );
   }
 }
- 
-// Placeholder screens for nav items not yet built
+
 class RoutesScreen extends StatelessWidget {
   const RoutesScreen({super.key});
   @override
@@ -126,7 +115,7 @@ class RoutesScreen extends StatelessWidget {
     body: Center(child: Text('Routes — coming soon')),
   );
 }
- 
+
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
   @override
@@ -134,4 +123,3 @@ class SettingsScreen extends StatelessWidget {
     body: Center(child: Text('Settings — coming soon')),
   );
 }
- 
