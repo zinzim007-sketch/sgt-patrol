@@ -13,9 +13,12 @@ void main() {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => DroneProvider()
-          .useMock = false  // use real PX4
-          ..connect()),,
+        ChangeNotifierProvider(create: (_) {
+          final provider = DroneProvider();
+          provider.useMock = false;
+          provider.connect();
+          return provider;
+        }),
         ChangeNotifierProvider(create: (_) => MissionProvider()),
         ChangeNotifierProvider(create: (_) => DetectionProvider()),
       ],
