@@ -752,6 +752,25 @@ class _ActionButtons extends StatelessWidget {
             )),
           ],
         ),
+        Row(
+          children: [
+            Expanded(child: _SGTButton(
+              label: 'ARM',
+              icon: Icons.lock_open_outlined,
+              enabled: drone.isConnected,
+              onTap: () => drone.arm(),
+            )),
+            const SizedBox(width: 8),
+            Expanded(child: _SGTButton(
+              label: 'TAKEOFF',
+              icon: Icons.flight_takeoff_outlined,
+              enabled: drone.isConnected,
+              onTap: () => drone.takeoff(altitude: 10.0),
+            )),
+          ],
+        ),
+        //const SizedBox(height: 8),
+
         const SizedBox(height: 8),
         _PanicButton(drone: drone),
       ],
@@ -817,7 +836,7 @@ class _PanicButton extends StatelessWidget {
               // drone.flyTo(lat: panicLat, lng: panicLng);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('🚨 Panic triggered — drone dispatching to location'),
+                  content: Text(' Panic triggered. Drone dispatching to location'),
                   backgroundColor: SGTColors.danger,
                 ));
             }

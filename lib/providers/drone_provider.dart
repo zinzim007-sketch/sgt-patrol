@@ -7,33 +7,28 @@ import 'package:dart_mavlink/dialects/common.dart';
 
 /// DroneProvider — connects to PX4 via MAVLink UDP and streams real telemetry.
 ///
-/// MOCK MODE (useMock = true):
-///   Generates fake telemetry for UI testing without PX4 running.
-///   Auto-enabled on web since browsers can't open UDP sockets.
+/// PORT LAYOUT:
+///   Flutter listens on 14550 — PX4 sends telemetry here
+///   Flutter sends to 18570  — PX4 listens for GCS commands here
 ///
-/// REAL MODE (useMock = false):
-///   Opens a UDP socket, sends heartbeats to PX4 in WSL, and listens
-///   for telemetry back. Make sure PX4 SITL is running in WSL first.
-///
-/// NOTE: Update _px4Host to match your WSL IP (run `hostname -I` in Ubuntu)
-/// WSL IPs can change on reboot so update this if connection stops working.
+/// MOCK MODE: auto-enabled on web (kIsWeb = true)
+/// REAL MODE: Windows desktop, PX4 SITL running in WSL
 
 class DroneProvider extends ChangeNotifier {
 
   // -------------------------------------------------------------------------
   // Mock / Real switch
-  // Auto-mock on web since browsers can't open raw UDP sockets
   // -------------------------------------------------------------------------
 
   bool useMock = kIsWeb;
 
   // -------------------------------------------------------------------------
-  // MAVLink config
-  // Update _px4Host to your WSL IP from `hostname -I` in Ubuntu
+  // MAVLink port config
   // -------------------------------------------------------------------------
 
-  static const _px4Host = '127.0.0.1'; // <-- your WSL IP
-  static const _mavlinkPort = 14550;
+  static const _px4Host = '127.0.0.1';       // WSL mirrored networking
+  static const _listenPort = 14550;           // Flutter listens for PX4 telemetry
+  static const _px4ReceivePort = 18570;       // PX4 listens for GCS commands
 
   // -------------------------------------------------------------------------
   // Internal
@@ -42,8 +37,6 @@ class DroneProvider extends ChangeNotifier {
   RawDatagramSocket? _socket;
   Timer? _heartbeatTimer;
   final _parser = MavlinkParser(MavlinkDialectCommon());
-  InternetAddress? _px4Address;
-  int _px4ResponsePort = 14550;
 
   // -------------------------------------------------------------------------
   // State
@@ -81,30 +74,29 @@ class DroneProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Bind UDP socket to listen for incoming MAVLink messages
+      // Bind to listen for PX4 telemetry on port 14550
       _socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
-        _mavlinkPort,
+        _listenPort,
       );
-      print('[SGT] UDP socket bound on port $_mavlinkPort');
+      print('[SGT] Listening for PX4 telemetry on port $_listenPort');
+      print('[SGT] Sending GCS commands to PX4 on port $_px4ReceivePort');
 
       // Listen for incoming datagrams from PX4
       _socket!.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
           final datagram = _socket!.receive();
           if (datagram != null) {
-            _px4Address = datagram.address;
-            _px4ResponsePort = datagram.port;
             _parser.parse(datagram.data);
           }
         }
       });
 
-      // Listen for parsed MAVLink messages
+      // Parse MAVLink messages
       _parser.stream.listen(_handleMessage);
 
-      // Send heartbeats to PX4 so it knows where to send telemetry back
-      // This is how QGroundControl and all GCS tools work
+      // Send heartbeats to PX4's GCS receive port (18570)
+      // This tells PX4 a GCS is connected and allows arming
       _sendHeartbeat();
       _heartbeatTimer = Timer.periodic(
         const Duration(seconds: 1),
@@ -113,7 +105,6 @@ class DroneProvider extends ChangeNotifier {
 
       statusMessage = 'Waiting for PX4 heartbeat...';
       notifyListeners();
-      print('[SGT] Sending heartbeats to PX4 at $_px4Host:$_mavlinkPort');
 
     } catch (e) {
       statusMessage = 'Failed to connect: $e';
@@ -123,6 +114,7 @@ class DroneProvider extends ChangeNotifier {
     }
   }
 
+  // Send heartbeat TO PX4 on port 18570
   void _sendHeartbeat() {
     if (_socket == null) return;
     try {
@@ -135,19 +127,18 @@ class DroneProvider extends ChangeNotifier {
         mavlinkVersion: 3,
       );
       final frame = MavlinkFrame.v2(0, 255, 0, heartbeat);
-      final bytes = frame.serialize();
       _socket!.send(
-        bytes,
+        frame.serialize(),
         InternetAddress(_px4Host),
-        _mavlinkPort,
+        _px4ReceivePort, // Send to PX4's GCS port
       );
     } catch (e) {
-      print('[SGT] Heartbeat send error: $e');
+      print('[SGT] Heartbeat error: $e');
     }
   }
 
   // -------------------------------------------------------------------------
-  // Handle incoming MAVLink messages
+  // Handle incoming MAVLink messages from PX4
   // -------------------------------------------------------------------------
 
   void _handleMessage(MavlinkFrame frame) {
@@ -161,7 +152,7 @@ class DroneProvider extends ChangeNotifier {
       if (!isConnected) {
         isConnected = true;
         statusMessage = 'Connected to PX4';
-        print('[SGT] PX4 connected — receiving position telemetry');
+        print('[SGT] Connected — receiving position telemetry');
       }
       notifyListeners();
     }
@@ -175,7 +166,7 @@ class DroneProvider extends ChangeNotifier {
       if (message.batteryRemaining >= 0) {
         batteryLevel = message.batteryRemaining;
         if (batteryLevel <= 10) {
-          statusMessage = '⚠️ Low battery — returning home';
+          statusMessage = 'Low battery - returning home';
         }
       }
       notifyListeners();
@@ -191,13 +182,13 @@ class DroneProvider extends ChangeNotifier {
         isConnected = true;
         statusMessage = 'Connected to PX4';
         notifyListeners();
-        print('[SGT] Heartbeat received from PX4');
+        print('[SGT] Heartbeat received');
       }
     }
   }
 
   // -------------------------------------------------------------------------
-  // MAVLink commands
+  // MAVLink commands — send to PX4 on port 18570
   // -------------------------------------------------------------------------
 
   void _sendCommand({
@@ -225,27 +216,60 @@ class DroneProvider extends ChangeNotifier {
       param7: param7,
     );
     final frame = MavlinkFrame.v2(0, 255, 0, message);
-    final bytes = frame.serialize();
-    _socket!.send(bytes, InternetAddress(_px4Host), _mavlinkPort);
+    _socket!.send(
+      frame.serialize(),
+      InternetAddress(_px4Host),
+      _px4ReceivePort, // Always send commands to PX4's GCS port
+    );
   }
 
   void arm() {
     if (useMock || _socket == null) return;
-    print('[SGT] Arming...');
+    print('[SGT] Sending ARM command...');
     _sendCommand(
       command: mavCmdComponentArmDisarm,
       param1: 1,
-      param2: 21196, // Force arm bypass in SITL
+      param2: 21196, // Force arm in SITL
     );
   }
 
-  void takeoff({double altitude = 10.0}) {
+  void disarm() {
     if (useMock || _socket == null) return;
-    print('[SGT] Taking off to ${altitude}m...');
+    print('[SGT] Sending DISARM command...');
+    _sendCommand(
+      command: mavCmdComponentArmDisarm,
+      param1: 0,
+    );
+  }
+
+  /*void takeoff({double altitude = 10.0}) {
+    if (useMock || _socket == null) return;
+    print('[SGT] Sending TAKEOFF command to ${altitude}m...');
     _sendCommand(
       command: mavCmdNavTakeoff,
       param7: altitude,
     );
+  }*/
+  void takeoff({double altitude = 10.0}) {
+    if (useMock || _socket == null) return;
+    print('[SGT] Setting mode to TAKEOFF...');
+    
+    // First set mode to auto takeoff
+    _sendCommand(
+      command: mavCmdDoSetMode,
+      param1: 1,    // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+      param2: 4,    // PX4 auto mode
+      param3: 2,    // PX4 takeoff submode
+    );
+    
+    // Then send takeoff command
+    Future.delayed(const Duration(milliseconds: 500), () {
+      print('[SGT] Sending TAKEOFF to ${altitude}m...');
+      _sendCommand(
+        command: mavCmdNavTakeoff,
+        param7: altitude,
+      );
+    });
   }
 
   void flyTo({required double lat, required double lng, required double alt}) {
@@ -273,7 +297,7 @@ class DroneProvider extends ChangeNotifier {
     _socket!.send(
       frame.serialize(),
       InternetAddress(_px4Host),
-      _mavlinkPort,
+      _px4ReceivePort,
     );
   }
 
@@ -286,7 +310,7 @@ class DroneProvider extends ChangeNotifier {
       statusMessage = 'Returning to home...';
       notifyListeners();
       Future.delayed(const Duration(seconds: 3), () {
-        statusMessage = 'Mock: Drone landed safely';
+        statusMessage = 'Drone landed safely';
         isConnected = false;
         _clearTelemetry();
         notifyListeners();
@@ -302,7 +326,7 @@ class DroneProvider extends ChangeNotifier {
   }
 
   // -------------------------------------------------------------------------
-  // MOCK — fake telemetry for web/UI testing
+  // MOCK
   // -------------------------------------------------------------------------
 
   Timer? _telemetryTimer;
@@ -333,7 +357,7 @@ class DroneProvider extends ChangeNotifier {
         longitude = 18.423 + (_random.nextDouble() * 0.0004 - 0.0002);
         gpsSatellites = 12 + _random.nextInt(4);
         if (batteryLevel <= 10) {
-          statusMessage = '⚠️ Low battery — returning home';
+          statusMessage = 'Low battery - returning home';
         }
       }
       notifyListeners();
