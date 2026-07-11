@@ -736,19 +736,22 @@ class _ActionButtons extends StatelessWidget {
               label: 'UPLOAD', icon: Icons.upload_outlined,
               enabled: drone.isConnected && mission.canUpload,
               onTap: () => mission.uploadMission(
-                PatrolRoute.defaultRoute, useMock: drone.useMock),
+                PatrolRoute.defaultRoute, useMock: drone.useMock, drone: drone),
+                
             )),
             const SizedBox(width: 8),
             Expanded(child: _SGTButton(
               label: 'START PATROL', icon: Icons.play_arrow_outlined,
               enabled: drone.isConnected && mission.canStart,
-              onTap: () => mission.startMission(useMock: drone.useMock),
+              onTap: () => mission.startMission(useMock: drone.useMock, drone: drone),
+              
             )),
             const SizedBox(width: 8),
             Expanded(child: _SGTButton(
               label: 'STOP', icon: Icons.stop_outlined,
               enabled: drone.isConnected && mission.canStop,
-              onTap: () => mission.stopMission(useMock: drone.useMock),
+              
+              onTap: () => mission.stopMission(useMock: drone.useMock, drone: drone),
             )),
           ],
         ),

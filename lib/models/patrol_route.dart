@@ -28,15 +28,18 @@ class PatrolRoute {
     required this.waypoints,
     this.flightSpeedMs = 5.0,
   });
- 
-  /// Default Cape Town test route — replace with real farm coordinates
+
+/// Default zurich test route — replace with real farm coordinates bc the px4 is in zurich 
   static PatrolRoute get defaultRoute => const PatrolRoute(
-    name: 'Farm perimeter — north',
-    waypoints: [
-      PatrolWaypoint(latitude: -33.918, longitude: 18.423),
-      PatrolWaypoint(latitude: -33.919, longitude: 18.424),
-      PatrolWaypoint(latitude: -33.920, longitude: 18.423),
-      PatrolWaypoint(latitude: -33.919, longitude: 18.422),
-    ],
-  );
+  name: 'Test patrol — Zurich SITL',
+  waypoints: [
+    PatrolWaypoint(latitude: 47.398, longitude: 8.546),
+    PatrolWaypoint(latitude: 47.398, longitude: 8.548),
+    PatrolWaypoint(latitude: 47.396, longitude: 8.548),
+    PatrolWaypoint(latitude: 47.396, longitude: 8.546),
+  ],
+);
+ 
+  
+  
 }
