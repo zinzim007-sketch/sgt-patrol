@@ -9,18 +9,18 @@ import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/mission_screen.dart';
 
+
+
 void main() {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => DroneProvider()..connect()),
-
-        //ChangeNotifierProvider(create: (_) {
-          //final provider = DroneProvider();
-          //provider.useMock = false;
-          //provider.connect();
-          //return provider;
-        //}),
+        ChangeNotifierProvider(create: (_) {      
+          final provider = DroneProvider();
+          provider.useMock = false;
+          provider.connect();
+          return provider;
+        }),
         ChangeNotifierProvider(create: (_) => MissionProvider()),
         ChangeNotifierProvider(create: (_) => DetectionProvider()),
       ],

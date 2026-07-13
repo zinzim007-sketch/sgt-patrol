@@ -50,7 +50,9 @@ DETECT_CLASSES = {
 class SGTDetector:
     def __init__(self, video_src):
         print('[SGT] Loading YOLOv8 model...')
-        self.model = YOLO('yolov8n.pt')  # nano — fastest for demo
+        
+        self.model = YOLO('yolo26n-visdrone-best.pt')  
+   
         print('[SGT] Model loaded')
 
         self.video_src = video_src

@@ -81,6 +81,11 @@ class _TopBar extends StatelessWidget {
                   fontSize: 8, color: SGTColors.textMuted, letterSpacing: 1.0)),
             ),
             const Spacer(),
+            if (!drone.useMock)
+              Text(
+                '${drone.latitude.toStringAsFixed(4)}, ${drone.longitude.toStringAsFixed(4)}',
+                style: const TextStyle(fontSize: 9, color: SGTColors.textMuted),
+              ),
             // Critical alert badge
             if (detection.hasCritical)
               Container(
@@ -139,6 +144,8 @@ class _TopBar extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
                   color: drone.isConnected ? SGTColors.online : SGTColors.danger)),
+
+              
             ),
           ],
         ),
@@ -735,8 +742,14 @@ class _ActionButtons extends StatelessWidget {
             Expanded(child: _SGTButton(
               label: 'UPLOAD', icon: Icons.upload_outlined,
               enabled: drone.isConnected && mission.canUpload,
+              
               onTap: () => mission.uploadMission(
-                PatrolRoute.defaultRoute, useMock: drone.useMock, drone: drone),
+                              drone.useMock
+                                  ? PatrolRoute.defaultRoute
+                                  : PatrolRoute.relativeToPosition(drone.latitude, drone.longitude),
+                              useMock: drone.useMock,
+                              drone: drone,
+                            ),
                 
             )),
             const SizedBox(width: 8),
