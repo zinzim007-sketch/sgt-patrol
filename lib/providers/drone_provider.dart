@@ -48,6 +48,53 @@ class DroneProvider extends ChangeNotifier {
   double heading = 0.0;
 
   // -------------------------------------------------------------------------
+  // Focus mode — re-tasking the drone toward a verified pattern location
+  // -------------------------------------------------------------------------
+  //
+  // This is "Version A" of pattern response: the drone loiters near a
+  // location that the operator has verified as a real threat. It does
+  // NOT track or follow a specific individual across the frame — that
+  // would need person re-identification and active flight steering,
+  // which isn't built. Be upfront about that distinction if asked.
+
+  bool isFocusing = false;
+  String? focusReason;
+  double? _focusLat;
+  double? _focusLng;
+
+  /// Re-task the drone toward a location — called after the operator
+  /// verifies a recurring-presence pattern as a real threat.
+  void focusOn({required double lat, required double lng, String? reason, double alt = 20}) {
+    isFocusing = true;
+    focusReason = reason;
+    _focusLat = lat;
+    _focusLng = lng;
+    statusMessage = reason != null
+        ? 'Repositioning — focusing on: $reason'
+        : 'Repositioning to flagged location';
+    notifyListeners();
+
+    if (useMock) {
+      // Mock mode: the telemetry timer below will jitter around this
+      // point from now on, simulating the drone loitering here. No real
+      // flight command exists yet in mock mode — this is a UI/state
+      // simulation, not an actual repositioning.
+      return;
+    }
+    flyTo(lat: lat, lng: lng, alt: alt);
+  }
+
+  /// Return to normal patrol behaviour.
+  void clearFocus() {
+    isFocusing = false;
+    focusReason = null;
+    _focusLat = null;
+    _focusLng = null;
+    statusMessage = isConnected ? 'Patrol resumed' : statusMessage;
+    notifyListeners();
+  }
+
+  // -------------------------------------------------------------------------
   // Connect
   // -------------------------------------------------------------------------
 
@@ -248,6 +295,8 @@ class DroneProvider extends ChangeNotifier {
     });
   }
 
+  /// Directly repositions the drone (guided mode) to a lat/lng/alt.
+  /// Used by focusOn() for real flight; can also be called directly.
   void flyTo({required double lat, required double lng, required double alt}) {
     if (useMock || _socket == null) return;
     final message = SetPositionTargetGlobalInt(
@@ -275,7 +324,6 @@ class DroneProvider extends ChangeNotifier {
         statusMessage = 'Drone landed safely';
         isConnected = false;
         _clearTelemetry();
-        notifyListeners();
         callback(true, 'Mock: Drone returning home');
       });
       return;
@@ -319,11 +367,16 @@ class DroneProvider extends ChangeNotifier {
         altitude += 0.5;
         if (_takeoffStep >= 40) _takingOff = false;
       } else {
+        // Jitter around the focus point if focusing, otherwise the
+        // default demo patrol area.
+        final centerLat = (isFocusing && _focusLat != null) ? _focusLat! : -33.919;
+        final centerLng = (isFocusing && _focusLng != null) ? _focusLng! : 18.423;
+
         altitude = 20.0 + (_random.nextDouble() * 2 - 1);
         speed = 2 + _random.nextInt(4).toDouble();
         batteryLevel = (batteryLevel - 1).clamp(0, 100);
-        latitude = -33.919 + (_random.nextDouble() * 0.0004 - 0.0002);
-        longitude = 18.423 + (_random.nextDouble() * 0.0004 - 0.0002);
+        latitude = centerLat + (_random.nextDouble() * 0.0004 - 0.0002);
+        longitude = centerLng + (_random.nextDouble() * 0.0004 - 0.0002);
         gpsSatellites = 12 + _random.nextInt(4);
         if (batteryLevel <= 10) {
           statusMessage = 'Low battery - returning home';

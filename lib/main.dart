@@ -24,9 +24,46 @@ void main() {
         ChangeNotifierProvider(create: (_) => MissionProvider()),
         ChangeNotifierProvider(create: (_) => DetectionProvider()),
       ],
-      child: const SGTPatrolApp(),
+      // _ProviderWiring connects DetectionProvider and DroneProvider
+      // together once both exist — see class below.
+      child: const _ProviderWiring(child: SGTPatrolApp()),
     ),
   );
+}
+
+/// Wires cross-provider callbacks once, after all providers in the tree
+/// above have been created.
+///
+/// Specifically: when the operator verifies a recurring-presence pattern
+/// (loitering / unusual vehicle frequency) as a real threat in
+/// DetectionProvider, that hands off to DroneProvider.focusOn() so the
+/// drone re-tasks toward that zone. Without this wiring, verifyThreat()
+/// still logs the confirmation correctly — it just won't move the drone.
+class _ProviderWiring extends StatefulWidget {
+  final Widget child;
+  const _ProviderWiring({required this.child});
+
+  @override
+  State<_ProviderWiring> createState() => _ProviderWiringState();
+}
+
+class _ProviderWiringState extends State<_ProviderWiring> {
+  bool _wired = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_wired) {
+      final detection = context.read<DetectionProvider>();
+      final drone = context.read<DroneProvider>();
+
+      detection.onFocusRequested = (lat, lng, reason) {
+        drone.focusOn(lat: lat, lng: lng, reason: reason);
+      };
+
+      _wired = true;
+    }
+    return widget.child;
+  }
 }
 
 final _router = GoRouter(

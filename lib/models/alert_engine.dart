@@ -1,6 +1,6 @@
 import 'site_config.dart';
 
-/// Detection classes from YOLOv8
+/// Detection classes from the detector
 enum DetectionClass {
   person,
   vehicle,
@@ -29,6 +29,19 @@ class AlertEngineResult {
   final bool showDispatchDrone;
   final Color levelColor;
 
+  /// True when this result represents a recurring-presence pattern
+  /// (loitering / repeat visit) rather than a single detection. The UI
+  /// should render these as a distinct "verify this pattern" card with
+  /// VERIFY AS THREAT / NOT A CONCERN actions instead of plain
+  /// CONFIRM / DISMISS.
+  final bool isPatternCandidate;
+
+  /// Centroid of the zone this pattern was seen in — set only when
+  /// isPatternCandidate is true. Lets the operator app re-task the
+  /// drone to that location if they verify it as a real threat.
+  final double? focusLat;
+  final double? focusLng;
+
   const AlertEngineResult({
     required this.level,
     required this.title,
@@ -38,6 +51,9 @@ class AlertEngineResult {
     required this.showCallAuthorities,
     required this.showDispatchDrone,
     required this.levelColor,
+    this.isPatternCandidate = false,
+    this.focusLat,
+    this.focusLng,
   });
 }
 
@@ -52,11 +68,86 @@ class Color {
 ///
 /// Takes a detection event + site context and returns the appropriate
 /// alert level and operator actions.
+///
+/// Beyond static zone/time rules, this also tracks lightweight temporal
+/// patterns — no ML involved, just a sliding-window count of recent
+/// sightings per zone+class. This is intentionally simple: it's the
+/// "rule-based temporal query" step, the first achievable version of
+/// behavioural intelligence, before enough logged operator feedback
+/// exists to learn these patterns instead of hand-coding them.
 class AlertEngine {
 
   final SiteConfig siteConfig;
 
   AlertEngine({required this.siteConfig});
+
+  // -------------------------------------------------------------------------
+  // Temporal pattern tracking
+  // -------------------------------------------------------------------------
+  //
+  // NOTE: this history is in-memory and per-app-session only — it resets
+  // on restart and isn't shared across devices. Fine for a demo; once the
+  // SQLite event log is the source of truth, these counts should be
+  // computed from that log instead, so patterns survive restarts and can
+  // eventually work cross-site.
+  //
+  // IMPORTANT HONESTY NOTE: these counters are keyed by zone + class, not
+  // by individual identity. "3rd sighting in this zone" does not mean
+  // "the same person" — there's no re-identification here. Frame this as
+  // "unusual activity frequency in this location," not "we recognized
+  // this specific person/vehicle again."
+
+  final Map<String, List<DateTime>> _sightingHistory = {};
+
+  static const _loiterWindow = Duration(minutes: 5);
+  static const _loiterThreshold = 3; // sightings in same zone within window
+
+  static const _repeatVisitWindow = Duration(hours: 1);
+  static const _repeatVisitThreshold = 2; // vehicle sightings in same zone within window
+
+  // Once a pattern candidate has been surfaced for a given zone+class,
+  // suppress surfacing it again for this long — otherwise it fires on
+  // every single qualifying detection while the person/vehicle is still
+  // there (e.g. every ~5 seconds), flooding the operator with duplicates
+  // of the same not-yet-reviewed pattern. The underlying sighting count
+  // still keeps accumulating during the cooldown; only the "surface a
+  // NEW pattern-candidate card" step is suppressed.
+  final Map<String, DateTime> _patternSurfacedAt = {};
+  static const _patternCooldown = Duration(minutes: 2);
+
+  bool _shouldSurfacePattern(String key) {
+    final last = _patternSurfacedAt[key];
+    final now = DateTime.now();
+    if (last != null && now.difference(last) < _patternCooldown) return false;
+    _patternSurfacedAt[key] = now;
+    return true;
+  }
+
+  /// Records a sighting for this class+zone and returns how many
+  /// sightings have occurred within `window`, including this one.
+  int _recordSighting(
+    DetectionClass detectionClass,
+    PatrolZone? zoneObj, {
+    required Duration window,
+  }) {
+    final key = '${zoneObj?.id ?? "none"}|${detectionClass.name}';
+    final now = DateTime.now();
+    final history = _sightingHistory.putIfAbsent(key, () => []);
+    history.add(now);
+    history.removeWhere((t) => now.difference(t) > window);
+    return history.length;
+  }
+
+  /// Centroid of a zone's boundary — used as the "focus here" point if
+  /// the operator verifies a recurring-presence pattern as a real threat.
+  ({double lat, double lng})? _zoneCentroid(PatrolZone? zoneObj) {
+    if (zoneObj == null || zoneObj.boundary.isEmpty) return null;
+    final lat = zoneObj.boundary.map((p) => p.latitude).reduce((a, b) => a + b) /
+        zoneObj.boundary.length;
+    final lng = zoneObj.boundary.map((p) => p.longitude).reduce((a, b) => a + b) /
+        zoneObj.boundary.length;
+    return (lat: lat, lng: lng);
+  }
 
   // -------------------------------------------------------------------------
   // Main evaluation method
@@ -86,14 +177,15 @@ class AlertEngine {
       );
     }
 
-    // Step 3 — Determine zone
-    final zone = _getZone(latitude, longitude);
-    final withinHours = siteConfig.hours.isWithinHours;
+    // Step 3 — Determine zone (as an object, so we can read its
+    // hoursOverride and compute a centroid, not just its sensitivity tier)
+    final zoneObj = _getZoneObj(latitude, longitude);
+    final withinHours = (zoneObj?.hoursOverride ?? siteConfig.hours).isWithinHours;
 
     // Step 4 — Apply rules based on detection class + zone + time + site type
     return _applyRules(
       detectionClass: detectionClass,
-      zone: zone,
+      zoneObj: zoneObj,
       withinHours: withinHours,
       personCount: personCount ?? 1,
     );
@@ -148,17 +240,17 @@ class AlertEngine {
 
   AlertEngineResult _applyRules({
     required DetectionClass detectionClass,
-    required ZoneSensitivity? zone,
+    required PatrolZone? zoneObj,
     required bool withinHours,
     required int personCount,
   }) {
     switch (detectionClass) {
 
       case DetectionClass.person:
-        return _evaluatePerson(zone, withinHours, personCount);
+        return _evaluatePerson(zoneObj, withinHours, personCount);
 
       case DetectionClass.vehicle:
-        return _evaluateVehicle(zone, withinHours);
+        return _evaluateVehicle(zoneObj, withinHours);
 
       case DetectionClass.animal:
         // Animals are always logged only — no operator action needed
@@ -173,12 +265,20 @@ class AlertEngine {
   }
 
   AlertEngineResult _evaluatePerson(
-      ZoneSensitivity? zone, bool withinHours, int personCount) {
+      PatrolZone? zoneObj, bool withinHours, int personCount) {
+
+    final zone = zoneObj?.sensitivity;
+
+    // Record this sighting and check for a loitering pattern — same
+    // zone, repeatedly, in a short window.
+    final sightingCount =
+        _recordSighting(DetectionClass.person, zoneObj, window: _loiterWindow);
+    final isLoitering = sightingCount >= _loiterThreshold;
 
     // Multiple people detected — always escalate one level
     final groupDetected = personCount >= 3;
 
-    // Red zone — always critical regardless of time
+    // Red zone — always critical regardless of time or pattern
     if (zone == ZoneSensitivity.red) {
       return _critical(
         title: '🚨 INTRUDER IN RESTRICTED ZONE',
@@ -186,6 +286,33 @@ class AlertEngine {
             ' This zone requires immediate response.',
         showCallAuthorities: true,
         showDispatchDrone: true,
+      );
+    }
+
+    // Loitering pattern — surfaced as a pattern candidate for operator
+    // verification, not an automatic accusation. This is the "recurring
+    // presence — verify" flow: AI surfaces it, human judges it, and if
+    // confirmed, the app can re-task the drone toward this zone.
+    if (isLoitering && _shouldSurfacePattern('loiter|${zoneObj?.id ?? "none"}')) {
+      final centroid = _zoneCentroid(zoneObj);
+      return AlertEngineResult(
+        level: AlertLevel.alert,
+        title: '⏱ RECURRING PRESENCE — VERIFY',
+        description:
+            '${_personDesc(zone, withinHours, personCount)} '
+            'This is the ${sightingCount}th person sighting in '
+            '${zoneObj != null ? "\"${zoneObj.name}\"" : "this area"} within '
+            '${_loiterWindow.inMinutes} minutes. Not identity-matched — this '
+            'counts any person detected here, not necessarily the same '
+            'individual. Verify on feed before treating as a threat.',
+        actionLabel: 'Review feed and verify',
+        requiresImmediateAction: false,
+        showCallAuthorities: false,
+        showDispatchDrone: true,
+        levelColor: const Color(0xFFf39c12),
+        isPatternCandidate: true,
+        focusLat: centroid?.lat,
+        focusLng: centroid?.lng,
       );
     }
 
@@ -227,15 +354,48 @@ class AlertEngine {
     );
   }
 
-  AlertEngineResult _evaluateVehicle(ZoneSensitivity? zone, bool withinHours) {
+  AlertEngineResult _evaluateVehicle(PatrolZone? zoneObj, bool withinHours) {
+
+    final zone = zoneObj?.sensitivity;
+
+    // Record this sighting and check for a repeat-visit pattern — same
+    // vehicle-class+zone appearing multiple times in the last hour.
+    // Class-level, not per-plate — good enough for a rule-based first
+    // pass; per-vehicle identity (plate OCR or visual re-ID) is a
+    // separate, real ML component, not built yet.
+    final visitCount =
+        _recordSighting(DetectionClass.vehicle, zoneObj, window: _repeatVisitWindow);
+    final isRepeatVisitor = visitCount >= _repeatVisitThreshold;
 
     if (zone == ZoneSensitivity.red) {
       return _alert(
         title: 'Vehicle in restricted zone',
-        description: 'Vehicle detected in ${_zoneName(zone)} — '
+        description: 'Vehicle detected in ${_zoneName(zoneObj)} — '
             '${withinHours ? "during operating hours" : "outside operating hours"}. '
             'Verify if authorised.',
         showCallAuthorities: false,
+      );
+    }
+
+    if (isRepeatVisitor && _shouldSurfacePattern('vehicle|${zoneObj?.id ?? "none"}')) {
+      final centroid = _zoneCentroid(zoneObj);
+      return AlertEngineResult(
+        level: AlertLevel.alert,
+        title: '🔁 UNUSUAL VEHICLE FREQUENCY — VERIFY',
+        description:
+            'Vehicle-class activity detected in ${_zoneName(zoneObj)} for the '
+            '$visitCount time in the last ${_repeatVisitWindow.inHours} hour(s). '
+            'Not plate-matched — this counts any vehicle detected here, not '
+            'necessarily the same one. Elevated frequency in a normally '
+            'quiet zone is still worth a look — verify on feed.',
+        actionLabel: 'Review feed and verify',
+        requiresImmediateAction: false,
+        showCallAuthorities: false,
+        showDispatchDrone: true,
+        levelColor: const Color(0xFFf39c12),
+        isPatternCandidate: true,
+        focusLat: centroid?.lat,
+        focusLng: centroid?.lng,
       );
     }
 
@@ -258,7 +418,7 @@ class AlertEngine {
     // During hours in non-restricted zone — log only
     return _log(
       title: 'Vehicle detected',
-      description: 'Vehicle detected in ${_zoneName(zone)} during operating hours.',
+      description: 'Vehicle detected in ${_zoneName(zoneObj)} during operating hours.',
     );
   }
 
@@ -269,7 +429,7 @@ class AlertEngine {
   String _personDesc(ZoneSensitivity? zone, bool withinHours, int count) {
     final countStr = count > 1 ? '$count people' : 'Person';
     final timeStr = withinHours ? 'during operating hours' : 'outside operating hours';
-    final zoneStr = zone != null ? 'in ${_zoneName(zone)}' : 'in patrol area';
+    final zoneStr = zone != null ? 'in ${_zoneNameFromSensitivity(zone)}' : 'in patrol area';
     final siteStr = _siteContext();
     return '$countStr detected $zoneStr $timeStr. $siteStr';
   }
@@ -287,9 +447,12 @@ class AlertEngine {
     }
   }
 
-  String _zoneName(ZoneSensitivity? zone) {
-    if (zone == null) return 'unknown area';
-    // Find the zone name from config
+  String _zoneName(PatrolZone? zoneObj) {
+    if (zoneObj == null) return 'unknown area';
+    return zoneObj.name;
+  }
+
+  String _zoneNameFromSensitivity(ZoneSensitivity zone) {
     try {
       final z = siteConfig.zones.firstWhere((z) => z.sensitivity == zone);
       return z.name;
@@ -302,29 +465,28 @@ class AlertEngine {
     }
   }
 
-  /// Point-in-polygon check — is the detection inside a zone?
-  ZoneSensitivity? _getZone(double? lat, double? lng) {
+  /// Point-in-polygon check — is the detection inside a zone? Returns
+  /// the zone object itself (not just its sensitivity) so callers can
+  /// read hoursOverride, name, and boundary for a centroid.
+  PatrolZone? _getZoneObj(double? lat, double? lng) {
     if (lat == null || lng == null) return null;
 
-    // Check red zones first (highest priority)
     for (final zone in siteConfig.zones) {
       if (zone.sensitivity == ZoneSensitivity.red &&
           _pointInPolygon(lat, lng, zone.boundary)) {
-        return ZoneSensitivity.red;
+        return zone;
       }
     }
-    // Then amber
     for (final zone in siteConfig.zones) {
       if (zone.sensitivity == ZoneSensitivity.amber &&
           _pointInPolygon(lat, lng, zone.boundary)) {
-        return ZoneSensitivity.amber;
+        return zone;
       }
     }
-    // Then green
     for (final zone in siteConfig.zones) {
       if (zone.sensitivity == ZoneSensitivity.green &&
           _pointInPolygon(lat, lng, zone.boundary)) {
-        return ZoneSensitivity.green;
+        return zone;
       }
     }
     return null; // Outside all zones

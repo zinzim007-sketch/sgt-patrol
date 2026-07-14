@@ -12,6 +12,7 @@ class DetectionAlert {
   final double? longitude;
   final AlertEngineResult engineResult;
   bool dismissed;
+  bool confirmed;
   bool reportedToAuthorities;
   bool droneDispatched;
 
@@ -25,6 +26,7 @@ class DetectionAlert {
     this.latitude,
     this.longitude,
     this.dismissed = false,
+    this.confirmed = false,
     this.reportedToAuthorities = false,
     this.droneDispatched = false,
   });

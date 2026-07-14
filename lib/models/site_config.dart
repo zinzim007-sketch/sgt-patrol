@@ -16,11 +16,19 @@ class PatrolZone {
   final ZoneSensitivity sensitivity;
   final List<ZonePoint> boundary;
 
+  /// Optional per-zone hours override. Use this when a specific street/zone
+  /// has a genuinely different rhythm than the site default — e.g. a
+  /// nightlife strip that's normally busy until 1am shouldn't trigger
+  /// "after hours" alerts at 9pm just because the site default closes then.
+  /// Falls back to SiteConfig.hours when null.
+  final SiteHours? hoursOverride;
+
   const PatrolZone({
     required this.id,
     required this.name,
     required this.sensitivity,
     required this.boundary,
+    this.hoursOverride,
   });
 }
 
@@ -35,7 +43,7 @@ class ZonePoint {
 /// Client operating hours
 class SiteHours {
   final String start; // "06:00"
-  final String end;   // "18:00"
+  final String end;   // "18:00" — if end < start, treated as spanning midnight
   final List<int> days; // 1=Mon, 7=Sun
 
   const SiteHours({
@@ -56,6 +64,10 @@ class SiteHours {
     final endMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
     final nowMinutes = now.hour * 60 + now.minute;
 
+    if (endMinutes < startMinutes) {
+      // Window spans midnight, e.g. 06:00 -> 01:00
+      return nowMinutes >= startMinutes || nowMinutes <= endMinutes;
+    }
     return nowMinutes >= startMinutes && nowMinutes <= endMinutes;
   }
 }
@@ -207,6 +219,89 @@ class SiteConfig {
           ZonePoint(-33.9195, 18.4232),
           ZonePoint(-33.9200, 18.4232),
           ZonePoint(-33.9200, 18.4228),
+        ],
+      ),
+    ],
+  );
+
+  /// Stellenbosch deployment config — first live site.
+  ///
+  /// Coordinates are centred on real Stellenbosch town (approx.
+  /// -33.9346, 18.8602) — replace boundary points with your actual
+  /// surveyed zone polygons before going live; these are placeholder
+  /// rectangles sized for a demo, not surveyed property lines.
+  ///
+  /// Per-zone hoursOverride models "different streets are noisier at
+  /// certain hours": the Dorp/Church Street strip runs later before
+  /// anything there counts as "after hours," while the residential
+  /// zone closes earlier since foot traffic there genuinely drops off
+  /// sooner.
+  static SiteConfig get stellenbosch => SiteConfig(
+    clientName: 'Stellenbosch — Pilot Deployment',
+    siteType: SiteType.commercial,
+    hours: const SiteHours(
+      start: '06:00',
+      end: '20:00',
+      days: [1, 2, 3, 4, 5, 6, 7],
+    ),
+    zones: [
+      PatrolZone(
+        id: 'green_1',
+        name: 'Die Boord residential streets',
+        sensitivity: ZoneSensitivity.green,
+        hoursOverride: const SiteHours(
+          start: '06:00',
+          end: '19:00', // quiet suburb — flags earlier in the evening
+          days: [1, 2, 3, 4, 5, 6, 7],
+        ),
+        boundary: const [
+          ZonePoint(-33.9420, 18.8600),
+          ZonePoint(-33.9420, 18.8650),
+          ZonePoint(-33.9460, 18.8650),
+          ZonePoint(-33.9460, 18.8600),
+        ],
+      ),
+      PatrolZone(
+        id: 'amber_1',
+        name: 'Dorp Street & Church Street strip',
+        sensitivity: ZoneSensitivity.amber,
+        hoursOverride: const SiteHours(
+          start: '06:00',
+          end: '01:00', // nightlife strip — normal foot traffic until late
+          days: [1, 2, 3, 4, 5, 6, 7],
+        ),
+        boundary: const [
+          ZonePoint(-33.9340, 18.8595),
+          ZonePoint(-33.9340, 18.8630),
+          ZonePoint(-33.9355, 18.8630),
+          ZonePoint(-33.9355, 18.8595),
+        ],
+      ),
+      PatrolZone(
+        id: 'amber_2',
+        name: 'Student housing corridor — Bird Street',
+        sensitivity: ZoneSensitivity.amber,
+        hoursOverride: const SiteHours(
+          start: '06:00',
+          end: '23:00',
+          days: [1, 2, 3, 4, 5, 6, 7],
+        ),
+        boundary: const [
+          ZonePoint(-33.9370, 18.8660),
+          ZonePoint(-33.9370, 18.8690),
+          ZonePoint(-33.9385, 18.8690),
+          ZonePoint(-33.9385, 18.8660),
+        ],
+      ),
+      PatrolZone(
+        id: 'red_1',
+        name: 'Restricted — cash-in-transit / high-value entrances',
+        sensitivity: ZoneSensitivity.red,
+        boundary: const [
+          ZonePoint(-33.9345, 18.8608),
+          ZonePoint(-33.9345, 18.8612),
+          ZonePoint(-33.9349, 18.8612),
+          ZonePoint(-33.9349, 18.8608),
         ],
       ),
     ],

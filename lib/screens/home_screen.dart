@@ -621,21 +621,92 @@ class _AlertCard extends StatelessWidget {
                 const SizedBox(width: 8),
               ],
 
-              // Dismiss — always shown
-              GestureDetector(
-                onTap: () => detection.dismissAlert(alert.id),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: SGTColors.surfaceRaised,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: SGTColors.border, width: 0.5),
+              // Pattern candidates (recurring presence / unusual vehicle
+              // frequency) get a distinct verify flow instead of plain
+              // confirm/dismiss — AI surfaced a pattern, human judges it.
+              if (result.isPatternCandidate) ...[
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      detection.verifyThreat(alert.id);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Verified as threat — drone re-tasking to this zone'),
+                          backgroundColor: SGTColors.danger,
+                        ));
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: SGTColors.danger.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: SGTColors.danger, width: 0.5),
+                      ),
+                      child: const Text('VERIFY AS THREAT',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 10, letterSpacing: 0.6, fontWeight: FontWeight.w500,
+                          color: SGTColors.danger)),
+                    ),
                   ),
-                  child: const Text('DISMISS',
-                    style: TextStyle(
-                      fontSize: 10, letterSpacing: 0.8, color: SGTColors.textSecondary)),
                 ),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => detection.notAConcern(alert.id),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: SGTColors.surfaceRaised,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: SGTColors.border, width: 0.5),
+                      ),
+                      child: const Text('NOT A CONCERN',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 10, letterSpacing: 0.6, color: SGTColors.textSecondary)),
+                    ),
+                  ),
+                ),
+              ] else ...[
+                // Confirm — positive training signal for a normal detection
+                GestureDetector(
+                  onTap: () {
+                    detection.confirmAlert(alert.id);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Confirmed — logged for retraining')));
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: SGTColors.online.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: SGTColors.online, width: 0.5),
+                    ),
+                    child: const Text('CONFIRM',
+                      style: TextStyle(
+                        fontSize: 10, letterSpacing: 0.8, fontWeight: FontWeight.w500,
+                        color: SGTColors.online)),
+                  ),
+                ),
+                const SizedBox(width: 8),
+
+                // Dismiss — false alarm, negative training signal
+                GestureDetector(
+                  onTap: () => detection.dismissAlert(alert.id),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: SGTColors.surfaceRaised,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: SGTColors.border, width: 0.5),
+                    ),
+                    child: const Text('DISMISS',
+                      style: TextStyle(
+                        fontSize: 10, letterSpacing: 0.8, color: SGTColors.textSecondary)),
+                  ),
+                ),
+              ],
             ],
           ),
         ],

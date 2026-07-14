@@ -22,6 +22,14 @@ class DetectionProvider extends ChangeNotifier {
   SiteConfig siteConfig = SiteConfig.demo;
   late AlertEngine _engine;
 
+  /// Wire this in app setup to connect pattern-verification to the
+  /// drone, e.g.:
+  ///   detectionProvider.onFocusRequested = (lat, lng, reason) =>
+  ///       droneProvider.focusOn(lat: lat, lng: lng, reason: reason);
+  /// Left null-safe on purpose — if it's never wired, verifyThreat()
+  /// still logs the confirmation, it just won't move the drone.
+  void Function(double lat, double lng, String reason)? onFocusRequested;
+
   DetectionProvider() {
     _engine = AlertEngine(siteConfig: siteConfig);
   }
@@ -41,6 +49,11 @@ class DetectionProvider extends ChangeNotifier {
   // Only critical alerts
   List<DetectionAlert> get criticalAlerts =>
       alerts.where((a) => !a.dismissed && a.isCritical).toList();
+
+  // Recurring-presence patterns awaiting operator verification
+  List<DetectionAlert> get pendingPatterns => alerts
+      .where((a) => !a.dismissed && a.engineResult.isPatternCandidate)
+      .toList();
 
   int get unreadCount => activeAlerts.length;
   bool get hasCritical => criticalAlerts.isNotEmpty;
@@ -164,10 +177,13 @@ class DetectionProvider extends ChangeNotifier {
       longitude: lng,
     );
 
-    // Skip logging level alerts from appearing in the active panel
-    // They still get added to the full alerts list for history
+    // Use the server-generated event id when present — this is the same
+    // id the event log (SQLite, in detector.py) used when it logged the
+    // detection, so confirm/dismiss can be written back to the right row.
+    final eventId = det['id'] as String? ?? '${className}_${now.millisecondsSinceEpoch}';
+
     final alert = DetectionAlert(
-      id: '${className}_${now.millisecondsSinceEpoch}',
+      id: eventId,
       label: det['label'] as String,
       className: className,
       confidence: det['confidence'] as int,
@@ -183,17 +199,17 @@ class DetectionProvider extends ChangeNotifier {
 
   DetectionClass _mapClass(String className) {
     switch (className) {
-      case 'person': return DetectionClass.person;
+      // VisDrone classes
+      case 'pedestrian':
+      case 'people': return DetectionClass.person;
       case 'car':
+      case 'van':
       case 'truck':
-      case 'motorcycle':
       case 'bus':
-      case 'bicycle': return DetectionClass.vehicle;
-      case 'dog':
-      case 'cat':
-      case 'horse':
-      case 'cow':
-      case 'sheep': return DetectionClass.animal;
+      case 'motor':
+      case 'bicycle':
+      case 'tricycle':
+      case 'awning-tricycle': return DetectionClass.vehicle;
       case 'fire': return DetectionClass.fire;
       case 'smoke': return DetectionClass.smoke;
       default: return DetectionClass.unknown;
@@ -204,10 +220,67 @@ class DetectionProvider extends ChangeNotifier {
   // Alert actions
   // -------------------------------------------------------------------------
 
+  /// Operator confirms this was a real detection worth acting on.
+  /// This is the positive training signal for a normal (non-pattern) alert.
+  void confirmAlert(String id) {
+    try {
+      final alert = alerts.firstWhere((a) => a.id == id);
+      alert.confirmed = true;
+      alert.dismissed = true;
+      _sendOperatorResponse(id, 'confirmed');
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// Operator dismisses this as a false alarm. This is the negative
+  /// training signal — every dismiss is a labelled example too, not
+  /// just a UI action.
   void dismissAlert(String id) {
     try {
       alerts.firstWhere((a) => a.id == id).dismissed = true;
+      _sendOperatorResponse(id, 'dismissed');
       notifyListeners();
+    } catch (_) {}
+  }
+
+  /// For pattern-candidate alerts (recurring presence / unusual vehicle
+  /// frequency): operator has looked at the feed and judges this a real
+  /// threat. Logs it as confirmed AND, if onFocusRequested is wired,
+  /// re-tasks the drone toward the zone this pattern was seen in.
+  void verifyThreat(String id) {
+    try {
+      final alert = alerts.firstWhere((a) => a.id == id);
+      alert.confirmed = true;
+      alert.dismissed = true;
+      _sendOperatorResponse(id, 'confirmed');
+
+      final result = alert.engineResult;
+      if (result.isPatternCandidate &&
+          result.focusLat != null &&
+          result.focusLng != null) {
+        onFocusRequested?.call(result.focusLat!, result.focusLng!, result.title);
+      }
+
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// For pattern-candidate alerts: operator has looked at the feed and
+  /// judges this is NOT a concern (just normal frequent traffic, e.g.
+  /// a busy zone or shift change). Logged as a dismissed/false-positive
+  /// pattern, same as a normal dismiss.
+  void notAConcern(String id) => dismissAlert(id);
+
+  void _sendOperatorResponse(String id, String response) {
+    // Best-effort — if the socket's already closed this just no-ops.
+    // The event still exists in the log with operator_action = NULL,
+    // which is itself useful signal (nobody reviewed it).
+    try {
+      _channel?.sink.add(jsonEncode({
+        'action': 'operator_response',
+        'id': id,
+        'response': response,
+      }));
     } catch (_) {}
   }
 
