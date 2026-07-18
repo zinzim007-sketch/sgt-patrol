@@ -352,6 +352,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.1.5+1"
+  roslibdart:
+    dependency: "direct main"
+    description:
+      name: roslibdart
+      sha256: "7473a39947f3f5ee32b032f8bab5285a465449e5cd234ae486e5ea11bd6c9e3b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.1-dev+4"
   sanitize_html:
     dependency: transitive
     description:

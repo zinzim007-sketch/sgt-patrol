@@ -4,17 +4,16 @@ SGT Patrol — YOLO26 (VisDrone) Detection Server
 Runs YOLO26 on a video file (or webcam/drone feed) and broadcasts
 detection results over WebSocket to the Flutter operator app.
 
-Every detection is logged to a local SQLite event log. When the
-operator confirms or dismisses an alert in the app, that decision is
-sent back over the same WebSocket and written to the matching row.
-
-Performance notes (read this if the feed looks slow/paused):
-- Model inference runs in a background thread via run_in_executor,
-  so it no longer blocks the WebSocket/frame loop while it computes.
-- The SQLite connection is opened once at startup and reused, instead
-  of opening/closing a new connection on every detection.
-- MIN_CONFIDENCE and DETECT_EVERY_N_FRAMES below are your two main
-  speed/accuracy knobs if it's still too slow on your machine.
+IMPORTANT — CPU vs GPU:
+On CPU-only hardware, one inference pass can genuinely take 0.5-5+
+seconds (confirmed via the SLOW inference logging below). That's a
+real hardware limit, not a bug. What WAS fixable: video streaming is
+now decoupled from detection, so the camera feed stays smooth and
+continuous at all times, while detection runs in the background and
+updates the drawn boxes whenever it finishes — even if that's a
+second or two behind the current frame. This is the honest, correct
+architecture for slow inference hardware: a laggy detector should
+never mean a frozen video feed.
 
 Usage:
     python detector.py --video assets/demo/patrol_demo.mp4
@@ -44,8 +43,9 @@ import torch
 
 PORT = 8765
 MIN_CONFIDENCE = 0.4          # raise this (e.g. 0.5) if you're getting noisy/low-quality detections
-DETECT_EVERY_N_FRAMES = 5     # raise this (e.g. 8-10) if the feed is still slow — trades detection latency for speed
+DETECT_EVERY_N_FRAMES = 5     # how often a NEW detection pass is kicked off — video keeps streaming regardless
 INFERENCE_SIZE = 416          # lower than default 640 — smaller = faster on CPU, some accuracy tradeoff
+STREAM_FPS_CAP = 20           # video send rate — independent of detection speed now
 DB_PATH = 'patrol_events.db'
 
 print(f'[SGT] CUDA (GPU) available: {torch.cuda.is_available()}')
@@ -127,6 +127,14 @@ class SGTDetector:
         self.last_detected = {}
         self._executor = ThreadPoolExecutor(max_workers=1)
 
+        # Detection runs independently of the video stream. The stream
+        # always draws whatever is in _cached_boxes, updated whenever a
+        # background detection pass finishes — could be a frame or two
+        # (or a couple seconds, on slow CPUs) behind the live picture.
+        self._cached_boxes = []          # boxes to draw on every streamed frame
+        self._pending_new_detections = []  # new detections to attach to the next outgoing message
+        self._inference_in_flight = False
+
     def _should_send(self, key):
         now = time.time()
         last = self.last_detected.get(key, 0)
@@ -140,9 +148,8 @@ class SGTDetector:
         return base64.b64encode(buffer).decode('utf-8')
 
     def _run_inference(self, frame):
-        """Runs in a background thread via run_in_executor — this is the
-        blocking call, kept OFF the asyncio event loop so frame sending
-        and WebSocket messages keep flowing while it computes."""
+        """Runs in a background thread via run_in_executor — the actual
+        blocking call, kept OFF the asyncio event loop."""
         t0 = time.time()
         result = self.model(frame, verbose=False, imgsz=INFERENCE_SIZE)[0]
         elapsed = time.time() - t0
@@ -150,40 +157,17 @@ class SGTDetector:
             print(f'[SGT] SLOW inference: {elapsed:.2f}s for one frame — likely CPU-bound')
         return result
 
-    async def run(self):
-        self.running = True
-        src = int(self.video_src) if self.video_src == '0' else self.video_src
-        cap = cv2.VideoCapture(src)
-
-        if not cap.isOpened():
-            print(f'[SGT] ERROR: Could not open video: {self.video_src}')
-            return
-
-        print(f'[SGT] Detection running on: {self.video_src}')
-        frame_count = 0
-        loop = asyncio.get_event_loop()
-
-        while self.running:
-            ret, frame = cap.read()
-
-            if not ret:
-                # Loop video for demo
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
-
-            frame_count += 1
-
-            if frame_count % DETECT_EVERY_N_FRAMES != 0:
-                await asyncio.sleep(0.01)
-                continue
-
-            # Non-blocking — inference happens in a background thread,
-            # the event loop stays free to send frames/handle messages
-            # while this runs.
+    async def _detect_async(self, frame):
+        """Kicked off periodically via asyncio.create_task — does NOT
+        block the main streaming loop. Updates _cached_boxes and queues
+        any new (throttled) detections once inference completes."""
+        self._inference_in_flight = True
+        try:
+            loop = asyncio.get_event_loop()
             results = await loop.run_in_executor(self._executor, self._run_inference, frame)
 
-            detections = []
-            annotated_frame = frame.copy()
+            boxes = []
+            new_detections = []
 
             for box in results.boxes:
                 class_id = int(box.cls[0])
@@ -197,42 +181,21 @@ class SGTDetector:
 
                 info = DETECT_CLASSES[class_name]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                color = info['color']
 
-                # Bounding box
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                boxes.append({
+                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                    'color': info['color'],
+                    'label_text': f"{info['label']} {int(confidence * 100)}%",
+                })
 
-                # Corner brackets
-                b = 12
-                cv2.line(annotated_frame, (x1, y1), (x1 + b, y1), color, 2)
-                cv2.line(annotated_frame, (x1, y1), (x1, y1 + b), color, 2)
-                cv2.line(annotated_frame, (x2, y1), (x2 - b, y1), color, 2)
-                cv2.line(annotated_frame, (x2, y1), (x2, y1 + b), color, 2)
-                cv2.line(annotated_frame, (x1, y2), (x1 + b, y2), color, 2)
-                cv2.line(annotated_frame, (x1, y2), (x1, y2 - b), color, 2)
-                cv2.line(annotated_frame, (x2, y2), (x2 - b, y2), color, 2)
-                cv2.line(annotated_frame, (x2, y2), (x2, y2 - b), color, 2)
-
-                # Label
-                label = f"{info['label']} {int(confidence * 100)}%"
-                cv2.rectangle(annotated_frame, (x1, y1 - 20),
-                    (x1 + len(label) * 8, y1), color, -1)
-                cv2.putText(annotated_frame, label, (x1 + 2, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-
-                # Throttle by LABEL (PERSON/VEHICLE), not raw class name —
-                # this is the fix for multiple vehicle subtypes (car, van,
-                # truck...) each firing their own separate alert in the
-                # same busy frame. All vehicle subtypes now share one
-                # 5-second window.
+                # Throttle by LABEL (PERSON/VEHICLE), not raw class —
+                # multiple vehicle subtypes in one pass share one window.
                 throttle_key = info['label']
                 if self._should_send(throttle_key):
                     event_id = str(uuid.uuid4())
                     bbox = [x1, y1, x2 - x1, y2 - y1]
-
                     log_detection(event_id, class_name, int(confidence * 100), bbox)
-
-                    detections.append({
+                    new_detections.append({
                         'id': event_id,
                         'class': class_name,
                         'label': info['label'],
@@ -242,8 +205,71 @@ class SGTDetector:
                         'timestamp': int(time.time() * 1000),
                     })
 
+            self._cached_boxes = boxes
+            self._pending_new_detections.extend(new_detections)
+        finally:
+            self._inference_in_flight = False
+
+    def _draw_cached_boxes(self, frame):
+        """Cheap — just drawing, no inference. Runs every streamed frame."""
+        for b in self._cached_boxes:
+            x1, y1, x2, y2 = b['x1'], b['y1'], b['x2'], b['y2']
+            color = b['color']
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            br = 12
+            cv2.line(frame, (x1, y1), (x1 + br, y1), color, 2)
+            cv2.line(frame, (x1, y1), (x1, y1 + br), color, 2)
+            cv2.line(frame, (x2, y1), (x2 - br, y1), color, 2)
+            cv2.line(frame, (x2, y1), (x2, y1 + br), color, 2)
+            cv2.line(frame, (x1, y2), (x1 + br, y2), color, 2)
+            cv2.line(frame, (x1, y2), (x1, y2 - br), color, 2)
+            cv2.line(frame, (x2, y2), (x2 - br, y2), color, 2)
+            cv2.line(frame, (x2, y2), (x2, y2 - br), color, 2)
+
+            label = b['label_text']
+            cv2.rectangle(frame, (x1, y1 - 20), (x1 + len(label) * 8, y1), color, -1)
+            cv2.putText(frame, label, (x1 + 2, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        return frame
+
+    async def run(self):
+        self.running = True
+        src = int(self.video_src) if self.video_src == '0' else self.video_src
+        cap = cv2.VideoCapture(src)
+
+        if not cap.isOpened():
+            print(f'[SGT] ERROR: Could not open video: {self.video_src}')
+            return
+
+        print(f'[SGT] Detection running on: {self.video_src}')
+        frame_count = 0
+        min_frame_interval = 1.0 / STREAM_FPS_CAP
+
+        while self.running:
+            loop_start = time.time()
+            ret, frame = cap.read()
+
+            if not ret:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            frame_count += 1
+
+            # Kick off a NEW detection pass periodically, in the
+            # background — never blocks the streaming loop below.
+            if frame_count % DETECT_EVERY_N_FRAMES == 0 and not self._inference_in_flight:
+                asyncio.create_task(self._detect_async(frame.copy()))
+
+            # Streaming happens every loop iteration regardless of
+            # detection speed — this is what keeps the feed smooth.
+            annotated_frame = self._draw_cached_boxes(frame.copy())
+
             if self.clients:
                 frame_b64 = self._frame_to_base64(annotated_frame)
+                detections = self._pending_new_detections
+                self._pending_new_detections = []  # only send new ones once
+
                 message = json.dumps({
                     'type': 'frame',
                     'frame': frame_b64,
@@ -258,7 +284,10 @@ class SGTDetector:
                         disconnected.add(client)
                 self.clients -= disconnected
 
-            await asyncio.sleep(0.03)
+            # Cap the stream rate rather than a fixed sleep — keeps
+            # frame delivery steady regardless of how long the above took.
+            elapsed = time.time() - loop_start
+            await asyncio.sleep(max(0.0, min_frame_interval - elapsed))
 
         cap.release()
         print('[SGT] Detection stopped')

@@ -8,22 +8,42 @@ import 'providers/mission_provider.dart';
 import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/mission_screen.dart';
+import 'providers/ros_provider.dart';
 
 
 
 void main() {
+  print('[SGT] main() started');
+  
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) {      
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating DroneProvider');
           final provider = DroneProvider();
           provider.useMock = false;
           provider.connect();
           return provider;
         }),
-        ChangeNotifierProvider(create: (_) => MissionProvider()),
-        ChangeNotifierProvider(create: (_) => DetectionProvider()),
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating MissionProvider');
+          return MissionProvider();
+        }),
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating DetectionProvider');
+          return DetectionProvider();
+        }),
+        ChangeNotifierProvider(
+          lazy: false,
+          create: (_) {
+            print('[SGT] Creating RosProvider');
+            final provider = RosProvider();
+            provider.connect();
+            return provider;
+          },
+        ),
       ],
+
       // _ProviderWiring connects DetectionProvider and DroneProvider
       // together once both exist — see class below.
       child: const _ProviderWiring(child: SGTPatrolApp()),
