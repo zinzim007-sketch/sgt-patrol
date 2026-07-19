@@ -5,15 +5,19 @@ import 'package:roslibdart/roslibdart.dart';
 /// RosProvider — connects Flutter to ROS 2 via rosbridge WebSocket.
 ///
 /// Rosbridge runs in WSL on port 9090.
-/// Subscribes to /safeguard/detections and /safeguard/commands.
-/// Publishes operator actions to /safeguard/operator.
+///
+/// When a dispatch_drone command arrives from the Mission Planner:
+///   1. Shows a critical alert in the operator dashboard
+///   2. Automatically sends the drone to investigate (if GPS available)
+///
+/// Callbacks are wired in main.dart after all providers exist:
+///   rosProvider.onDispatchDrone = (reason, confidence) => ...
+///   rosProvider.onRaiseAlert = (reason, confidence) => ...
 
 class RosProvider extends ChangeNotifier {
 
   static const _rosbridgeUrl = 'ws://127.0.0.1:9090';
-  RosProvider() {
-    print('[SGT ROS] RosProvider created');
-  }
+
   Ros? _ros;
   Topic? _detectionsSub;
   Topic? _commandsSub;
@@ -25,18 +29,24 @@ class RosProvider extends ChangeNotifier {
   List<Map<String, dynamic>> latestDetections = [];
   Map<String, dynamic>? latestCommand;
 
+  // Callbacks wired by main.dart after all providers are created
+  void Function(String reason, int confidence)? onDispatchDrone;
+  void Function(String reason, int confidence)? onRaiseAlert;
+
+  RosProvider() {
+    print('[SGT ROS] RosProvider created');
+  }
+
   // -------------------------------------------------------------------------
   // Connect
   // -------------------------------------------------------------------------
 
   Future<void> connect() async {
     print('[SGT ROS] Attempting to connect to $_rosbridgeUrl...');
-  
     try {
       _ros = Ros(url: _rosbridgeUrl);
       _ros!.connect();
 
-      // Give rosbridge a moment to connect
       await Future.delayed(const Duration(seconds: 1));
 
       isConnected = true;
@@ -103,19 +113,46 @@ class RosProvider extends ChangeNotifier {
     print('[SGT ROS] Subscribed to /safeguard/commands');
   }
 
+  // Throttle — don't fire the same action more than once per 10 seconds
+  final Map<String, DateTime> _lastFired = {};
+
   Future<void> _onCommand(Map<String, dynamic> message) async {
     try {
       final data = message['data'] as String;
-      latestCommand = jsonDecode(data) as Map<String, dynamic>;
+      final command = jsonDecode(data) as Map<String, dynamic>;
+      latestCommand = command;
       notifyListeners();
-      print('[SGT ROS] Command: ${latestCommand?['action']}');
+
+      final action = command['action'] as String;
+      final reason = command['reason'] as String? ?? 'Unknown';
+      final confidence = command['confidence'] as int? ?? 0;
+
+      // Throttle per action type
+      final now = DateTime.now();
+      final last = _lastFired[action];
+      if (last != null && now.difference(last).inSeconds < 10) return;
+      _lastFired[action] = now;
+
+      print('[SGT ROS] Command: $action ($reason $confidence%)');
+
+      switch (action) {
+        case 'dispatch_drone':
+          // Trigger critical alert + autonomous drone dispatch
+          onDispatchDrone?.call(reason, confidence);
+          break;
+        case 'raise_alert':
+          // Trigger alert in dashboard
+          onRaiseAlert?.call(reason, confidence);
+          break;
+      }
+
     } catch (e) {
       print('[SGT ROS] Command parse error: $e');
     }
   }
 
   // -------------------------------------------------------------------------
-  // Publish operator actions
+  // Publish operator actions to /safeguard/operator
   // -------------------------------------------------------------------------
 
   void _setupOperatorPublisher() {

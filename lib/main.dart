@@ -75,15 +75,42 @@ class _ProviderWiringState extends State<_ProviderWiring> {
     if (!_wired) {
       final detection = context.read<DetectionProvider>();
       final drone = context.read<DroneProvider>();
+      final ros = context.read<RosProvider>();
 
       detection.onFocusRequested = (lat, lng, reason) {
         drone.focusOn(lat: lat, lng: lng, reason: reason);
+      };
+
+      // Wire ROS 2 dispatch_drone command
+      ros.onDispatchDrone = (reason, confidence) {
+        // Trigger panic/critical alert in detection system
+        detection.triggerPanic(
+          lat: drone.latitude != 0.0 ? drone.latitude : null,
+          lng: drone.longitude != 0.0 ? drone.longitude : null,
+        );
+        // Autonomously dispatch drone to last known position
+        if (!drone.useMock && drone.latitude != 0.0) {
+          drone.focusOn(
+            lat: drone.latitude,
+            lng: drone.longitude,
+            reason: '$reason detected ($confidence% confidence)',
+          );
+        }
+        print('[SGT] Auto-dispatch: drone investigating $reason');
+      };
+
+      // Wire ROS 2 raise_alert command
+      ros.onRaiseAlert = (reason, confidence) {
+        print('[SGT] ROS alert: $reason ($confidence%)');
+        // DetectionProvider already handles alerts via WebSocket
+        // This is a secondary ROS 2 path for non-video detections
       };
 
       _wired = true;
     }
     return widget.child;
   }
+
 }
 
 final _router = GoRouter(
