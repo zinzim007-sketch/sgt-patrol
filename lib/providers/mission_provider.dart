@@ -81,6 +81,7 @@ class MissionProvider extends ChangeNotifier {
 
   void _handleMissionMessage(MavlinkFrame frame) {
     final message = frame.message;
+    print('[SGT] Mission message received: ${message.runtimeType}');//debug
     final waypoints = _pendingWaypoints;
     if (waypoints == null) return;
 
@@ -115,6 +116,7 @@ class MissionProvider extends ChangeNotifier {
 
     // Mission item reached during execution
     else if (message is MissionItemReached) {
+      print('[SGT] MissionItemReached: seq=${message.seq}'); //debug
       currentWaypoint = message.seq;
       statusMessage = 'Patrolling: waypoint $currentWaypoint / $totalWaypoints';
       notifyListeners();
