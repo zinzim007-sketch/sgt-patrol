@@ -6,7 +6,8 @@ import 'package:dart_mavlink/dialects/common.dart';
 import '../models/patrol_route.dart';
 import 'drone_provider.dart';
 
-enum MissionState { idle, uploading, ready, executing, complete, error }
+//enum MissionState { idle, uploading, ready, executing, complete, error }
+enum MissionState { idle, uploading, ready, executing, holding, complete, error }
 
 class MissionProvider extends ChangeNotifier {
 
@@ -254,6 +255,45 @@ class MissionProvider extends ChangeNotifier {
     });
   }
 
+    Timer? _holdTimer;
+    MissionState? _stateBeforeHold;
+
+    /// Called when a flyby detection is already zone/time-worthy — breaks
+    /// from the active route to hold over the detection's location for
+    /// [duration], giving the loitering check a real window to evaluate
+    /// during. Resumes the previous mission state automatically afterward
+    /// unless something else (like a confirmed pattern) changes state first.
+    void holdAt({
+      required double lat,
+      required double lng,
+      double alt = 20.0,
+      Duration duration = const Duration(seconds: 15),
+      required bool useMock,
+      DroneProvider? drone,
+    }) {
+      if (state != MissionState.executing) return; // only interrupt an active patrol
+      _stateBeforeHold = state;
+      state = MissionState.holding;
+      statusMessage = 'Investigating — holding position...';
+      notifyListeners();
+      print('[SGT] Holding at $lat, $lng for ${duration.inSeconds}s');
+
+      if (!useMock && drone != null) {
+        drone.reposition(lat: lat, lng: lng, alt: alt);
+      }
+
+      _holdTimer?.cancel();
+      _holdTimer = Timer(duration, () {
+        if (state != MissionState.holding) return; // already changed by something else
+        state = _stateBeforeHold ?? MissionState.executing;
+        statusMessage = 'Resuming patrol...';
+        notifyListeners();
+        print('[SGT] Hold complete — resuming patrol');
+      });
+    }
+
+    bool get isHolding => state == MissionState.holding;
+
   // -------------------------------------------------------------------------
   // Stop mission
   // -------------------------------------------------------------------------
@@ -304,6 +344,7 @@ class MissionProvider extends ChangeNotifier {
   @override
   void dispose() {
     _progressTimer?.cancel();
+    _holdTimer?.cancel();
     super.dispose();
   }
 }

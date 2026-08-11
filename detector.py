@@ -15,6 +15,15 @@ second or two behind the current frame. This is the honest, correct
 architecture for slow inference hardware: a laggy detector should
 never mean a frozen video feed.
 
+BEHAVIORAL LAYER (tracking + loitering):
+Detections are now run through model.track() instead of model(),
+giving each person/vehicle a persistent track ID across frames. A
+rolling position history per track ID is used to flag "loitering" —
+a tracked person staying within a small pixel radius for LOITER_SECONDS.
+This is pixel-based, not GPS-based — valid for a static/recorded camera
+source. Once the drone camera itself is moving in flight, this needs to
+become a GPS-projected zone check instead (future work, not this pass).
+
 Usage:
     python detector.py --video assets/demo/patrol_demo.mp4
     python detector.py --video 0                              (webcam)
@@ -33,6 +42,7 @@ import base64
 import time
 import uuid
 import sqlite3
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from ultralytics import YOLO
 import torch
@@ -47,6 +57,12 @@ DETECT_EVERY_N_FRAMES = 5     # how often a NEW detection pass is kicked off —
 INFERENCE_SIZE = 416          # lower than default 640 — smaller = faster on CPU, some accuracy tradeoff
 STREAM_FPS_CAP = 20           # video send rate — independent of detection speed now
 DB_PATH = 'patrol_events.db'
+
+# Behavioral layer — loitering
+LOITER_SECONDS = 8            # how long a track must stay in roughly the same spot to flag loitering
+LOITER_RADIUS_PX = 80         # max centroid movement (pixels) still counted as "roughly the same spot"
+LOITER_MIN_SAMPLES = 3        # need at least this many tracked samples before trusting a loitering read
+LOITER_ALERT_COOLDOWN = 15    # seconds before re-alerting the same still-loitering track
 
 print(f'[SGT] CUDA (GPU) available: {torch.cuda.is_available()}')
 if not torch.cuda.is_available():
@@ -65,6 +81,11 @@ DETECT_CLASSES = {
     'tricycle':        {'label': 'VEHICLE', 'priority': 'low',    'color': (0, 165, 255)},
     'awning-tricycle': {'label': 'VEHICLE', 'priority': 'low',    'color': (0, 165, 255)},
 }
+
+# Classes eligible for loitering checks. Vehicle "circling" reuses the
+# exact same track-history plumbing below — natural next addition,
+# not built in this pass.
+PERSON_TRACK_CLASSES = {'pedestrian', 'people'}
 
 # -------------------------------------------------------------------------
 # Event log (SQLite) — one persistent connection, opened once.
@@ -135,6 +156,10 @@ class SGTDetector:
         self._pending_new_detections = []  # new detections to attach to the next outgoing message
         self._inference_in_flight = False
 
+        # Behavioral layer — per track ID position history and alert cooldowns
+        self._track_history = defaultdict(list)   # track_id -> [(timestamp, cx, cy), ...]
+        self._loiter_last_alerted = {}             # track_id -> last alert timestamp
+
     def _should_send(self, key):
         now = time.time()
         last = self.last_detected.get(key, 0)
@@ -149,13 +174,54 @@ class SGTDetector:
 
     def _run_inference(self, frame):
         """Runs in a background thread via run_in_executor — the actual
-        blocking call, kept OFF the asyncio event loop."""
+        blocking call, kept OFF the asyncio event loop.
+
+        Uses model.track() instead of model() so YOLO's built-in tracker
+        (ByteTrack) assigns a persistent ID to each detection across
+        calls — no separate model or training needed for this."""
         t0 = time.time()
-        result = self.model(frame, verbose=False, imgsz=INFERENCE_SIZE)[0]
+        result = self.model.track(
+            frame,
+            persist=True,
+            tracker='bytetrack.yaml',
+            verbose=False,
+            imgsz=INFERENCE_SIZE,
+        )[0]
         elapsed = time.time() - t0
         if elapsed > 0.5:
             print(f'[SGT] SLOW inference: {elapsed:.2f}s for one frame — likely CPU-bound')
         return result
+
+    # -------------------------------------------------------------------
+    # Behavioral layer — loitering
+    # -------------------------------------------------------------------
+
+    def _update_track_history(self, track_id, cx, cy, now):
+        history = self._track_history[track_id]
+        history.append((now, cx, cy))
+        # Prune anything older than the loiter window (plus a small buffer)
+        cutoff = now - (LOITER_SECONDS + 5)
+        while history and history[0][0] < cutoff:
+            history.pop(0)
+
+    def _check_loitering(self, track_id, now):
+        history = self._track_history.get(track_id, [])
+        if len(history) < LOITER_MIN_SAMPLES:
+            return False
+        span = now - history[0][0]
+        if span < LOITER_SECONDS:
+            return False
+        xs = [p[1] for p in history]
+        ys = [p[2] for p in history]
+        spread = max(max(xs) - min(xs), max(ys) - min(ys))
+        return spread <= LOITER_RADIUS_PX
+
+    def _should_alert_loitering(self, track_id, now):
+        last = self._loiter_last_alerted.get(track_id, 0)
+        if now - last < LOITER_ALERT_COOLDOWN:
+            return False
+        self._loiter_last_alerted[track_id] = now
+        return True
 
     async def _detect_async(self, frame):
         """Kicked off periodically via asyncio.create_task — does NOT
@@ -168,6 +234,7 @@ class SGTDetector:
 
             boxes = []
             new_detections = []
+            now = time.time()
 
             for box in results.boxes:
                 class_id = int(box.cls[0])
@@ -182,10 +249,23 @@ class SGTDetector:
                 info = DETECT_CLASSES[class_name]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
+                # Track ID is None until the tracker has confirmed this
+                # detection belongs to a track (usually within a couple frames)
+                track_id = int(box.id[0]) if box.id is not None else None
+
+                is_loitering = False
+                if track_id is not None and class_name in PERSON_TRACK_CLASSES:
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    self._update_track_history(track_id, cx, cy, now)
+                    is_loitering = self._check_loitering(track_id, now)
+
                 boxes.append({
                     'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                    'color': info['color'],
-                    'label_text': f"{info['label']} {int(confidence * 100)}%",
+                    'color': (0, 255, 255) if is_loitering else info['color'],
+                    'label_text': (
+                        f"LOITERING #{track_id}" if is_loitering
+                        else f"{info['label']} {int(confidence * 100)}%"
+                    ),
                 })
 
                 # Throttle by LABEL (PERSON/VEHICLE), not raw class —
@@ -204,6 +284,25 @@ class SGTDetector:
                         'bbox': bbox,
                         'timestamp': int(time.time() * 1000),
                     })
+
+                # Loitering is its own event type, separate from the raw
+                # PERSON detection above — this is what the Flutter side
+                # can key off to trigger drone.focusOn().
+                if is_loitering and self._should_alert_loitering(track_id, now):
+                    event_id = str(uuid.uuid4())
+                    bbox = [x1, y1, x2 - x1, y2 - y1]
+                    log_detection(event_id, 'loitering', int(confidence * 100), bbox)
+                    new_detections.append({
+                        'id': event_id,
+                        'class': 'loitering',
+                        'label': 'LOITERING',
+                        'confidence': int(confidence * 100),
+                        'priority': 'critical',
+                        'bbox': bbox,
+                        'timestamp': int(time.time() * 1000),
+                        'track_id': track_id,
+                    })
+                    print(f'[SGT] LOITERING flagged — track #{track_id}, {span_desc(self._track_history[track_id])}')
 
             self._cached_boxes = boxes
             self._pending_new_detections.extend(new_detections)
@@ -235,7 +334,8 @@ class SGTDetector:
 
     async def run(self):
         self.running = True
-        src = int(self.video_src) if self.video_src == '0' else self.video_src
+        src = int(self.video_src) if self.video_src.isdigit() else self.video_src
+        #src = int(self.video_src) if self.video_src == '0' else self.video_src (switched from this when connecting the intel sense camera)
         cap = cv2.VideoCapture(src)
 
         if not cap.isOpened():
@@ -294,6 +394,12 @@ class SGTDetector:
 
     def stop(self):
         self.running = False
+
+
+def span_desc(history):
+    if not history:
+        return 'no history'
+    return f'{len(history)} samples over {history[-1][0] - history[0][0]:.1f}s'
 
 
 # -------------------------------------------------------------------------

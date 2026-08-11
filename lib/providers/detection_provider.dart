@@ -29,6 +29,15 @@ class DetectionProvider extends ChangeNotifier {
   /// Left null-safe on purpose — if it's never wired, verifyThreat()
   /// still logs the confirmation, it just won't move the drone.
   void Function(double lat, double lng, String reason)? onFocusRequested;
+  void Function(double lat, double lng)? onInvestigateRequested;
+
+  /// Live drone position lookup — wire this in main.dart, e.g.:
+  ///   detectionProvider.getDronePosition =
+  ///       () => (lat: drone.latitude, lng: drone.longitude);
+  /// Called fresh for every incoming detection batch, NOT captured once
+  /// at connect() time — the drone moves during a patrol, so a snapshot
+  /// taken when detection started would go stale immediately.
+  ({double lat, double lng})? Function()? getDronePosition;
 
   DetectionProvider() {
     _engine = AlertEngine(siteConfig: siteConfig);
@@ -85,10 +94,62 @@ class DetectionProvider extends ChangeNotifier {
   }
 
   // -------------------------------------------------------------------------
+  // Loitering trigger — from detector.py's tracker (persistent track ID +
+  // dwell-time threshold), NOT the zone-based "RECURRING PRESENCE — VERIFY"
+  // pattern in AlertEngine._evaluatePerson (that one counts any person in
+  // a zone, no identity). This is a stronger, already-confirmed signal, so
+  // it auto-dispatches the drone the same way the panic button does — no
+  // operator verification gate.
+  // -------------------------------------------------------------------------
+
+  void triggerLoitering({
+    required String id,
+    required int confidence,
+    double? lat,
+    double? lng,
+    int? trackId,
+  }) {
+    final result = _engine.evaluate(
+      detectionClass: DetectionClass.person,
+      latitude: lat,
+      longitude: lng,
+      scenario: ScenarioTrigger.loiteringConfirmed,
+    );
+
+    final alert = DetectionAlert(
+      id: id,
+      label: 'LOITERING',
+      className: 'loitering',
+      confidence: confidence,
+      timestamp: DateTime.now(),
+      engineResult: result,
+      latitude: lat,
+      longitude: lng,
+    );
+    alerts.insert(0, alert);
+    if (alerts.length > 100) alerts.removeLast();
+
+    // Auto-dispatch — lat/lng here are the drone's live position at the
+    // moment this detection arrived (see getDronePosition above), not a
+    // stale snapshot. If it's null (no GPS fix yet, or callback unwired),
+    // the alert still logs, it just won't move the drone.
+    if (lat != null && lng != null) {
+      onFocusRequested?.call(
+        lat,
+        lng,
+        trackId != null ? 'Loitering detected (track #$trackId)' : 'Loitering detected',
+      );
+      alert.droneDispatched = true;
+    }
+
+    notifyListeners();
+  }
+
+  // -------------------------------------------------------------------------
   // Connect to Python detection server
   // -------------------------------------------------------------------------
 
-  void connect({double? lat, double? lng}) {
+  void connect() {
     try {
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
       isConnected = true;
@@ -97,7 +158,7 @@ class DetectionProvider extends ChangeNotifier {
       notifyListeners();
 
       _subscription = _channel!.stream.listen(
-        (message) => _onMessage(message, lat: lat, lng: lng),
+        _onMessage,
         onError: (error) {
           statusMessage = 'Connection error — is detector.py running?';
           isConnected = false;
@@ -137,16 +198,31 @@ class DetectionProvider extends ChangeNotifier {
 
   final Map<String, DateTime> _lastAlerted = {};
 
-  void _onMessage(dynamic message, {double? lat, double? lng}) {
+  /// (0.0, 0.0) is DroneProvider's uninitialized default, not a real
+  /// position anywhere near South Africa — treat it as "no fix yet"
+  /// rather than a valid coordinate to dispatch the drone to.
+  ({double lat, double lng})? _currentDronePosition() {
+    final pos = getDronePosition?.call();
+    if (pos == null) return null;
+    if (pos.lat == 0.0 && pos.lng == 0.0) return null;
+    return pos;
+  }
+
+  void _onMessage(dynamic message) {
     try {
       final data = jsonDecode(message as String) as Map<String, dynamic>;
 
       if (data['type'] == 'frame') {
         currentFrameBase64 = data['frame'] as String?;
 
+        // Read live, once per batch of detections in this message —
+        // not captured once back at connect() time.
+        final pos = _currentDronePosition();
+        print('[SGT] Detection batch — drone position: $pos');
+
         final detections = data['detections'] as List<dynamic>? ?? [];
         for (final det in detections) {
-          _handleDetection(det as Map<String, dynamic>, lat: lat, lng: lng);
+          _handleDetection(det as Map<String, dynamic>, lat: pos?.lat, lng: pos?.lng);
         }
 
         notifyListeners();
@@ -160,6 +236,21 @@ class DetectionProvider extends ChangeNotifier {
     double? lng,
   }) {
     final className = det['class'] as String;
+
+    // Loitering is a distinct, already-confirmed behavioral event —
+    // route straight to auto-dispatch instead of the normal zone/time
+    // rule path below, which has no concept of tracked individuals.
+    if (className == 'loitering') {
+      triggerLoitering(
+        id: det['id'] as String? ?? 'loiter_${DateTime.now().millisecondsSinceEpoch}',
+        confidence: det['confidence'] as int? ?? 0,
+        lat: lat,
+        lng: lng,
+        trackId: det['track_id'] as int?,
+      );
+      return;
+    }
+
     final now = DateTime.now();
 
     // Throttle per class

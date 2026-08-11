@@ -316,6 +316,29 @@ class DroneProvider extends ChangeNotifier {
     _socket!.send(frame.serialize(), InternetAddress(_px4Host), _px4ReceivePort);
   }
 
+  /// Temporarily repositions the drone to hold over a point WITHOUT
+  /// abandoning the active mission — PX4 resumes the mission from where
+  /// it left off once this completes or is cancelled. This is the
+  /// mechanism behind "drone breaks from route to investigate something."
+  /// Different from flyTo(), which uses a raw guided setpoint and
+  /// generally requires leaving mission mode entirely.
+  /// NOT YET BENCH-TESTED — verify this actually holds mission state
+  /// correctly on your PX4 version before relying on it for a demo.
+  void reposition({required double lat, required double lng, required double alt}) {
+    if (useMock || _socket == null) return;
+    _sendCommand(
+      command: mavCmdDoReposition,
+      param1: -1,           // ground speed: -1 = no change
+      param2: 1,             // bitmask: bit0 set = change to reposition
+      param3: 0,
+      param4: double.nan,    // yaw: NaN = no change
+      param5: lat,
+      param6: lng,
+      param7: alt,
+    );
+    print('[SGT] Reposition (hold) command sent: $lat, $lng at ${alt}m');
+  }
+
   void returnToHome(Function(bool success, String message) callback) {
     if (useMock) {
       statusMessage = 'Returning to home...';

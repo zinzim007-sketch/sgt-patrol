@@ -15,32 +15,154 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: SGTColors.navyDeep,
       body: Column(
         children: [
-          _TopBar(),
-          Expanded(
-            flex: 3,
-            child: _VideoFeed(),
-          ),
+            _TopBar(),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  // Keep the existing widgets and provider actions exactly as
+                  // they are. This step only changes the dashboard layout.
+                  final isWide = constraints.maxWidth >= 900;
 
-          _TelemetryBar(),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _AlertPanel(),
-                  const SizedBox(height: 12),
-                  _MissionCard(),
-                  const SizedBox(height: 12),
-                  _ActionButtons(),
-                ],
+                  if (isWide) {
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          flex: 7,
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 16, 8, 16),
+                            child: Column(
+                              children: [
+                                Expanded(child: _VideoFeed()),
+                                const SizedBox(height: 10),
+                                _TelemetryBar(),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          flex: 3,
+                          child: Container(
+                            decoration: const BoxDecoration(
+                              color: SGTColors.surface,
+                              border: Border(
+                                left: BorderSide(
+                                  color: SGTColors.border,
+                                  width: 0.5,
+                                ),
+                              ),
+                            ),
+                            child: SingleChildScrollView(
+                              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const _SectionHeader(
+                                    title: 'OPERATIONS',
+                                    subtitle: 'Live patrol controls',
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _AlertPanel(),
+                                  const SizedBox(height: 18),
+                                  _MissionCard(),
+                                  const SizedBox(height: 18),
+                                  _ActionButtons(),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  }
+
+                  // Keep a practical stacked layout for smaller screens.
+                  return Column(
+                    children: [
+                      Expanded(flex: 5, child: _VideoFeed()),
+                      _TelemetryBar(),
+                      Expanded(
+                        flex: 5,
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const _SectionHeader(
+                                title: 'OPERATIONS',
+                                subtitle: 'Live patrol controls',
+                              ),
+                              const SizedBox(height: 14),
+                              _AlertPanel(),
+                              const SizedBox(height: 14),
+                              _MissionCard(),
+                              const SizedBox(height: 14),
+                              _ActionButtons(),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
-          ),
-        ],
+          ],
       ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final String subtitle;
+
+  const _SectionHeader({
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: const Color(0xFFF3F6FA),
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.8,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: const Color(0xFF8C98A8),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          width: 6,
+          height: 6,
+          decoration: const BoxDecoration(
+            color: SGTColors.blue,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -64,7 +186,7 @@ class _TopBar extends StatelessWidget {
           children: [
             const Text('SGT PATROL',
               style: TextStyle(
-                color: SGTColors.blueMuted, fontSize: 11,
+                color: const Color(0xFFE8EDF5), fontSize: 11,
                 fontWeight: FontWeight.w500, letterSpacing: 2.0)),
             const SizedBox(width: 8),
             // Site type badge
@@ -78,13 +200,13 @@ class _TopBar extends StatelessWidget {
               child: Text(
                 detection.siteConfig.siteType.name.toUpperCase(),
                 style: const TextStyle(
-                  fontSize: 8, color: SGTColors.textMuted, letterSpacing: 1.0)),
+                  fontSize: 8, color: const Color(0xFF8C98A8), letterSpacing: 1.0)),
             ),
             const Spacer(),
             if (!drone.useMock)
               Text(
                 '${drone.latitude.toStringAsFixed(4)}, ${drone.longitude.toStringAsFixed(4)}',
-                style: const TextStyle(fontSize: 9, color: SGTColors.textMuted),
+                style: const TextStyle(fontSize: 9, color: const Color(0xFF8C98A8)),
               ),
             // Critical alert badge
             if (detection.hasCritical)
@@ -183,13 +305,13 @@ class _VideoFeed extends StatelessWidget {
                 children: [
                   const Text('CAMERA FEED',
                     style: TextStyle(
-                      color: SGTColors.textMuted, fontSize: 11, letterSpacing: 2.0)),
+                      color: const Color(0xFF8C98A8), fontSize: 11, letterSpacing: 2.0)),
                   const SizedBox(height: 6),
                   Text(
                     detection.isDetecting
                         ? 'Connecting to detection server...'
                         : 'Run detector.py then press START DETECT',
-                    style: const TextStyle(color: SGTColors.textMuted, fontSize: 10)),
+                    style: const TextStyle(color: const Color(0xFF8C98A8), fontSize: 10)),
                 ],
               ),
             ),
@@ -205,7 +327,7 @@ class _VideoFeed extends StatelessWidget {
               child: Text(
                 detection.isDetecting
                     ? detection.statusMessage : drone.statusMessage,
-                style: const TextStyle(color: SGTColors.textSecondary, fontSize: 10)),
+                style: const TextStyle(color: const Color(0xFFB8C1CE), fontSize: 10)),
             )),
           if (drone.isConnected)
             Positioned(
@@ -229,12 +351,10 @@ class _VideoFeed extends StatelessWidget {
                 if (detection.isDetecting) {
                   detection.disconnect();
                 } else {
-                  detection.connect(
-                    lat: drone.latitude,
-                    lng: drone.longitude,
-                  );
+                  detection.connect();
                 }
               },
+              
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
@@ -340,22 +460,22 @@ class _TelemetryBar extends StatelessWidget {
           final isBatLow = cell.label == 'BAT' && drone.batteryLevel <= 20;
           return Expanded(
             child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 10),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               decoration: const BoxDecoration(
                 border: Border(right: BorderSide(color: SGTColors.border, width: 0.5))),
               child: Column(
                 children: [
                   Text(cell.label,
                     style: const TextStyle(
-                      fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.2)),
+                      fontSize: 9, color: const Color(0xFF8C98A8), letterSpacing: 1.2)),
                   const SizedBox(height: 3),
                   Text(cell.value,
                     style: TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w500,
+                      fontSize: 18, fontWeight: FontWeight.w600,
                       color: isBatLow ? SGTColors.danger : SGTColors.textPrimary,
                       fontFeatures: const [FontFeature.tabularFigures()])),
                   Text(cell.unit,
-                    style: const TextStyle(fontSize: 9, color: SGTColors.textMuted)),
+                    style: const TextStyle(fontSize: 9, color: const Color(0xFF8C98A8))),
                 ],
               ),
             ),
@@ -388,13 +508,13 @@ class _AlertPanel extends StatelessWidget {
           children: [
             const Text('ALERTS',
               style: TextStyle(
-                fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.5)),
+                fontSize: 9, color: const Color(0xFF8C98A8), letterSpacing: 1.5)),
             const Spacer(),
             GestureDetector(
               onTap: detection.clearAllAlerts,
               child: const Text('CLEAR ALL',
                 style: TextStyle(
-                  fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.0))),
+                  fontSize: 9, color: const Color(0xFF8C98A8), letterSpacing: 1.0))),
           ],
         ),
         const SizedBox(height: 8),
@@ -453,7 +573,7 @@ class _AlertCard extends StatelessWidget {
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(11),
       decoration: BoxDecoration(
         color: _levelBg,
         borderRadius: BorderRadius.circular(6),
@@ -487,22 +607,22 @@ class _AlertCard extends StatelessWidget {
               ),
               Text(alert.timeString,
                 style: const TextStyle(
-                  fontSize: 10, color: SGTColors.textMuted,
+                  fontSize: 10, color: const Color(0xFF8C98A8),
                   fontFeatures: [FontFeature.tabularFigures()])),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 5),
 
           // Description
           Text(result.description,
-            style: const TextStyle(fontSize: 11, color: SGTColors.textSecondary)),
+            style: const TextStyle(fontSize: 11, color: const Color(0xFFB8C1CE))),
 
           // GPS if available
           if (alert.latitude != null) ...[
             const SizedBox(height: 4),
             Text(
               'GPS: ${alert.latitude!.toStringAsFixed(5)}, ${alert.longitude!.toStringAsFixed(5)}',
-              style: const TextStyle(fontSize: 10, color: SGTColors.textMuted)),
+              style: const TextStyle(fontSize: 10, color: const Color(0xFF8C98A8))),
           ],
 
           // Action label
@@ -576,12 +696,12 @@ class _AlertCard extends StatelessWidget {
                       child: const Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.flight, size: 12, color: SGTColors.blueMuted),
+                          Icon(Icons.flight, size: 12, color: SGTColors.blue),
                           SizedBox(width: 6),
                           Text('DISPATCH DRONE',
                             style: TextStyle(
                               fontSize: 10, letterSpacing: 0.8,
-                              color: SGTColors.blueMuted, fontWeight: FontWeight.w500)),
+                              color: SGTColors.blue, fontWeight: FontWeight.w500)),
                         ],
                       ),
                     ),
@@ -664,7 +784,7 @@ class _AlertCard extends StatelessWidget {
                       child: const Text('NOT A CONCERN',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          fontSize: 10, letterSpacing: 0.6, color: SGTColors.textSecondary)),
+                          fontSize: 10, letterSpacing: 0.6, color: const Color(0xFFB8C1CE))),
                     ),
                   ),
                 ),
@@ -703,7 +823,7 @@ class _AlertCard extends StatelessWidget {
                     ),
                     child: const Text('DISMISS',
                       style: TextStyle(
-                        fontSize: 10, letterSpacing: 0.8, color: SGTColors.textSecondary)),
+                        fontSize: 10, letterSpacing: 0.8, color: const Color(0xFFB8C1CE))),
                   ),
                 ),
               ],
@@ -739,13 +859,14 @@ class _MissionCard extends StatelessWidget {
       MissionState.executing => 'EXECUTING',
       MissionState.complete => 'COMPLETE',
       MissionState.error => 'ERROR',
+      MissionState.holding => 'INVESTIGATING',
     };
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('ACTIVE MISSION',
-          style: TextStyle(fontSize: 9, color: SGTColors.textMuted, letterSpacing: 1.5)),
+          style: TextStyle(fontSize: 9, color: const Color(0xFF8C98A8), letterSpacing: 1.5)),
         const SizedBox(height: 8),
         Container(
           padding: const EdgeInsets.all(14),
@@ -762,14 +883,14 @@ class _MissionCard extends StatelessWidget {
                   children: [
                     const Text('Farm perimeter — north',
                       style: TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w500,
-                        color: SGTColors.textPrimary)),
+                        fontSize: 14, fontWeight: FontWeight.w600,
+                        color: const Color(0xFFF3F6FA))),
                     const SizedBox(height: 4),
                     Text(
                       mission.state == MissionState.executing
                           ? 'Waypoint ${mission.currentWaypoint} / ${mission.totalWaypoints}'
                           : '4 waypoints · 5 m/s',
-                      style: const TextStyle(fontSize: 11, color: SGTColors.textMuted)),
+                      style: const TextStyle(fontSize: 11, color: const Color(0xFF8C98A8))),
                   ],
                 ),
               ),
@@ -790,7 +911,7 @@ class _MissionCard extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(mission.statusMessage,
-          style: const TextStyle(fontSize: 11, color: SGTColors.textSecondary)),
+          style: const TextStyle(fontSize: 11, color: const Color(0xFFB8C1CE))),
       ],
     );
   }

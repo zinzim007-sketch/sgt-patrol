@@ -8,7 +8,11 @@ import 'providers/mission_provider.dart';
 import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/mission_screen.dart';
+import 'screens/routes_screen.dart';
+import 'screens/login_screen.dart';
 import 'providers/ros_provider.dart';
+import 'providers/route_provider.dart';
+import 'screens/settings_screen.dart';
 
 
 
@@ -18,10 +22,15 @@ void main() {
   runApp(
     MultiProvider(
       providers: [
+        ChangeNotifierProvider(create: (_) => OperatorSession()),
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating RouteProvider');
+          return RouteProvider();
+        }),
         ChangeNotifierProvider(create: (_) {
           print('[SGT] Creating DroneProvider');
           final provider = DroneProvider();
-          provider.useMock = false;
+          provider.useMock = true;
           provider.connect();
           return provider;
         }),
@@ -46,7 +55,11 @@ void main() {
 
       // _ProviderWiring connects DetectionProvider and DroneProvider
       // together once both exist — see class below.
-      child: const _ProviderWiring(child: SGTPatrolApp()),
+
+      child: const _ProviderWiring(
+        child: SGTPatrolApp(),
+      ),
+      
     ),
   );
 }
@@ -76,10 +89,20 @@ class _ProviderWiringState extends State<_ProviderWiring> {
       final detection = context.read<DetectionProvider>();
       final drone = context.read<DroneProvider>();
       final ros = context.read<RosProvider>();
+      final mission = context.read<MissionProvider>();
+
+      detection.onInvestigateRequested = (lat, lng) {
+        mission.holdAt(lat: lat, lng: lng, useMock: drone.useMock, drone: drone);
+      };
 
       detection.onFocusRequested = (lat, lng, reason) {
         drone.focusOn(lat: lat, lng: lng, reason: reason);
       };
+
+       // Live drone position for DetectionProvider — replaces the old
+      // connect(lat, lng) snapshot, which went stale as soon as the
+      // drone moved after detection started.
+      detection.getDronePosition = () => (lat: drone.latitude, lng: drone.longitude);
 
       // Wire ROS 2 dispatch_drone command
       ros.onDispatchDrone = (reason, confidence) {
@@ -117,7 +140,9 @@ final _router = GoRouter(
   initialLocation: '/',
   routes: [
     ShellRoute(
-      builder: (context, state, child) => AppShell(child: child),
+      builder: (context, state, child) => AuthGate(
+        child: AppShell(child: child),
+      ),
       routes: [
         GoRoute(path: '/', builder: (_, __) => const HomeScreen()),
         GoRoute(path: '/mission', builder: (_, __) => const MissionScreen()),
@@ -133,12 +158,15 @@ class SGTPatrolApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+
     return MaterialApp.router(
       title: 'SGT Patrol',
       debugShowCheckedModeBanner: false,
       theme: SGTTheme.dark,
       routerConfig: _router,
+      
     );
+
   }
 }
 
@@ -197,18 +225,7 @@ class AppShell extends StatelessWidget {
   }
 }
 
-class RoutesScreen extends StatelessWidget {
-  const RoutesScreen({super.key});
-  @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(child: Text('Routes — coming soon')),
-  );
-}
+// Routes screen lives in screens/routes_screen.dart.
 
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-  @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(child: Text('Settings — coming soon')),
-  );
-}
+
+

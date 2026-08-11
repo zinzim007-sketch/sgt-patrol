@@ -13,9 +13,10 @@ enum DetectionClass {
 /// Scenario triggers — override zone/time rules
 enum ScenarioTrigger {
   none,
-  panicButton,     // Physical or in-app panic button pressed
-  fireDetected,    // Fire or smoke detected
-  operatorFlagged, // Operator manually escalated
+  panicButton,        // Physical or in-app panic button pressed
+  fireDetected,        // Fire or smoke detected
+  operatorFlagged,     // Operator manually escalated
+  loiteringConfirmed,  // Tracker confirmed same individual, dwell-time threshold met
 }
 
 /// Result from the alert engine
@@ -227,6 +228,22 @@ class AlertEngine {
           showCallAuthorities: true,
           showDispatchDrone: true,
           levelColor: const Color(0xFFe74c3c),
+        );
+
+      case ScenarioTrigger.loiteringConfirmed:
+        // Distinct from the zone-based "RECURRING PRESENCE — VERIFY"
+        // pattern below (_evaluatePerson). That one counts ANY person
+        // seen repeatedly in a zone and explicitly isn't identity-matched.
+        // This one comes from detector.py's tracker — same individual,
+        // confirmed via persistent track ID + dwell-time threshold — so
+        // it skips the verify gate and dispatches immediately, same
+        // principle as the panic button.
+        return _alert(
+          title: '⏱ LOITERING CONFIRMED — DISPATCHING',
+          description: 'Same tracked individual has remained in one spot '
+              'for an extended period. Drone dispatching automatically to '
+              'investigate. Verify on live feed.',
+          showCallAuthorities: false,
         );
 
       default:
