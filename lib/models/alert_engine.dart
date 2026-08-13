@@ -1,4 +1,5 @@
 import 'site_config.dart';
+import 'feedback_stats.dart';
 
 /// Detection classes from the detector
 enum DetectionClass {
@@ -17,6 +18,7 @@ enum ScenarioTrigger {
   fireDetected,        // Fire or smoke detected
   operatorFlagged,     // Operator manually escalated
   loiteringConfirmed,  // Tracker confirmed same individual, dwell-time threshold met
+  behaviouralWatch,    // Explainable behavioural intelligence cue from detector
 }
 
 /// Result from the alert engine
@@ -43,6 +45,13 @@ class AlertEngineResult {
   final double? focusLat;
   final double? focusLng;
 
+  /// Key identifying this zone+class combo for feedback learning
+  /// (see FeedbackStats). Set by _applyFeedbackAdjustment for
+  /// person/vehicle detections; null for scenario triggers (panic,
+  /// fire, operator-escalated) and animal/unknown, which are never
+  /// adjusted by past feedback.
+  final String? feedbackKey;
+
   const AlertEngineResult({
     required this.level,
     required this.title,
@@ -55,6 +64,7 @@ class AlertEngineResult {
     this.isPatternCandidate = false,
     this.focusLat,
     this.focusLng,
+    this.feedbackKey,
   });
 }
 
@@ -76,11 +86,28 @@ class Color {
 /// "rule-based temporal query" step, the first achievable version of
 /// behavioural intelligence, before enough logged operator feedback
 /// exists to learn these patterns instead of hand-coding them.
+///
+/// FEEDBACK LEARNING: on top of the static rules, this now also reads
+/// FeedbackStats (confirm/dismiss history per zone+class, persisted
+/// locally by DetectionProvider) and downgrades alerts for combos
+/// operators have repeatedly dismissed as false positives. This is the
+/// real "learns over time" mechanism — statistical, not a retrained
+/// model, but genuinely adaptive and visible to the operator (the
+/// downgraded alert says why). Safety-critical results (red-zone
+/// intrusion, fire, panic) are deliberately never downgraded this way —
+/// see _applyFeedbackAdjustment.
 class AlertEngine {
 
   final SiteConfig siteConfig;
 
   AlertEngine({required this.siteConfig});
+
+  /// Injected by DetectionProvider after loading persisted history.
+  /// Defaults to empty (no adjustment) until that load completes.
+  FeedbackStats feedbackStats = FeedbackStats();
+
+  static const _feedbackMinSamples = 5;
+  static const _feedbackDismissThreshold = 0.7;
 
   // -------------------------------------------------------------------------
   // Temporal pattern tracking
@@ -162,12 +189,15 @@ class AlertEngine {
     int? personCount, // How many people detected simultaneously
   }) {
 
-    // Step 1 — Scenario triggers bypass all zone/time logic
+    // Step 1 — Scenario triggers bypass all zone/time logic AND feedback
+    // adjustment — panic/fire/operator-escalated are safety-critical and
+    // must never be softened by past dismiss history.
     if (scenario != ScenarioTrigger.none) {
       return _handleScenario(scenario, detectionClass);
     }
 
     // Step 2 — Fire and smoke are always critical regardless of zone/time
+    // (also bypasses feedback adjustment, same reasoning as above)
     if (detectionClass == DetectionClass.fire ||
         detectionClass == DetectionClass.smoke) {
       return _critical(
@@ -230,6 +260,14 @@ class AlertEngine {
           levelColor: const Color(0xFFe74c3c),
         );
 
+      case ScenarioTrigger.behaviouralWatch:
+        return _alert(
+          title: '🧠 BEHAVIOURAL PATTERN — REVIEW',
+          description: 'The patrol system detected an unusual movement pattern. '
+              'This is a behavioural cue for operator review, not a claim that a crime has occurred.',
+          showCallAuthorities: false,
+        );
+
       case ScenarioTrigger.loiteringConfirmed:
         // Distinct from the zone-based "RECURRING PRESENCE — VERIFY"
         // pattern below (_evaluatePerson). That one counts ANY person
@@ -261,16 +299,21 @@ class AlertEngine {
     required bool withinHours,
     required int personCount,
   }) {
-    switch (detectionClass) {
+    AlertEngineResult result;
 
+    switch (detectionClass) {
       case DetectionClass.person:
-        return _evaluatePerson(zoneObj, withinHours, personCount);
+        result = _evaluatePerson(zoneObj, withinHours, personCount);
+        break;
 
       case DetectionClass.vehicle:
-        return _evaluateVehicle(zoneObj, withinHours);
+        result = _evaluateVehicle(zoneObj, withinHours);
+        break;
 
       case DetectionClass.animal:
-        // Animals are always logged only — no operator action needed
+        // Animals are always logged only — no operator action needed,
+        // and not worth feedback-tracking since they're never escalated
+        // in the first place.
         return _log(
           title: 'Animal detected',
           description: 'Animal detected in patrol area — logged for review.',
@@ -279,7 +322,74 @@ class AlertEngine {
       default:
         return _log(title: 'Detection', description: 'Unknown object detected');
     }
+
+    return _applyFeedbackAdjustment(result, zoneObj, detectionClass);
   }
+
+  // -------------------------------------------------------------------------
+  // Feedback-based adjustment — the actual "learns over time" mechanism
+  // -------------------------------------------------------------------------
+
+  AlertEngineResult _applyFeedbackAdjustment(
+    AlertEngineResult result,
+    PatrolZone? zoneObj,
+    DetectionClass detectionClass,
+  ) {
+    final key = '${zoneObj?.id ?? "none"}|${detectionClass.name}';
+
+    // Never downgrade LOG (already lowest) or CRITICAL (safety-critical —
+    // a history of false positives elsewhere in this zone should never
+    // suppress a red-zone intrusion or similarly severe read; that's a
+    // deliberate line, not an oversight). Still attach the feedback key
+    // so confirm/dismiss on these has something to record against.
+    if (result.level == AlertLevel.log || result.level == AlertLevel.critical) {
+      return _withFeedbackKey(result, key);
+    }
+
+    final samples = feedbackStats.totalSamples(key);
+    final rate = feedbackStats.dismissRate(key);
+
+    if (samples >= _feedbackMinSamples && rate >= _feedbackDismissThreshold) {
+      final downgradedLevel =
+          result.level == AlertLevel.alert ? AlertLevel.watch : AlertLevel.log;
+      return AlertEngineResult(
+        level: downgradedLevel,
+        title: result.title,
+        description: '${result.description} Downgraded — operators have '
+            'dismissed ${(rate * 100).round()}% of the last $samples similar '
+            'alerts here as false positives.',
+        actionLabel: downgradedLevel == AlertLevel.log
+            ? 'Logged automatically'
+            : 'Monitor situation on live feed',
+        requiresImmediateAction: false,
+        showCallAuthorities: false,
+        showDispatchDrone: downgradedLevel == AlertLevel.watch ? result.showDispatchDrone : false,
+        levelColor: downgradedLevel == AlertLevel.watch
+            ? const Color(0xFF2979cc)
+            : const Color(0xFF4a6a8a),
+        isPatternCandidate: false, // downgraded out of pattern-candidate status
+        feedbackKey: key,
+      );
+    }
+
+    return _withFeedbackKey(result, key);
+  }
+
+  AlertEngineResult _withFeedbackKey(AlertEngineResult result, String key) =>
+      AlertEngineResult(
+        level: result.level,
+        title: result.title,
+        description: result.description,
+        actionLabel: result.actionLabel,
+        requiresImmediateAction: result.requiresImmediateAction,
+        showCallAuthorities: result.showCallAuthorities,
+        showDispatchDrone: result.showDispatchDrone,
+        levelColor: result.levelColor,
+        isPatternCandidate: result.isPatternCandidate,
+        focusLat: result.focusLat,
+        focusLng: result.focusLng,
+        feedbackKey: key,
+      );
 
   AlertEngineResult _evaluatePerson(
       PatrolZone? zoneObj, bool withinHours, int personCount) {

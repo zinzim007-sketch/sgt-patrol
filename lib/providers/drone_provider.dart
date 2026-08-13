@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:dart_mavlink/mavlink.dart';
 import 'package:dart_mavlink/dialects/common.dart';
+import '../models/patrol_route.dart';
 
 class DroneProvider extends ChangeNotifier {
 
@@ -63,8 +64,24 @@ class DroneProvider extends ChangeNotifier {
   double? _focusLng;
 
   /// Re-task the drone toward a location — called after the operator
-  /// verifies a recurring-presence pattern as a real threat.
+  /// verifies a recurring-presence pattern as a real threat. Sends a
+  /// real flight command (flyTo) in real mode. For panic dispatch, use
+  /// MissionProvider.dispatchToPanic() instead — that path sends
+  /// reposition() (preserves mission state) rather than flyTo(), and
+  /// this method is kept for the existing pattern-verification flow.
   void focusOn({required double lat, required double lng, String? reason, double alt = 20}) {
+    setFocusPoint(lat: lat, lng: lng, reason: reason);
+    if (useMock) return;
+    flyTo(lat: lat, lng: lng, alt: alt);
+  }
+
+  /// Sets the UI-facing "focusing on X" state (drives mock-mode jitter
+  /// target and status message) WITHOUT sending any flight command.
+  /// Used when the actual MAVLink command is sent separately by the
+  /// caller (e.g. MissionProvider.dispatchToPanic sends reposition()
+  /// itself) — kept separate so callers never risk double-sending
+  /// conflicting commands.
+  void setFocusPoint({required double lat, required double lng, String? reason}) {
     isFocusing = true;
     focusReason = reason;
     _focusLat = lat;
@@ -73,15 +90,6 @@ class DroneProvider extends ChangeNotifier {
         ? 'Repositioning — focusing on: $reason'
         : 'Repositioning to flagged location';
     notifyListeners();
-
-    if (useMock) {
-      // Mock mode: the telemetry timer below will jitter around this
-      // point from now on, simulating the drone loitering here. No real
-      // flight command exists yet in mock mode — this is a UI/state
-      // simulation, not an actual repositioning.
-      return;
-    }
-    flyTo(lat: lat, lng: lng, alt: alt);
   }
 
   /// Return to normal patrol behaviour.
@@ -319,9 +327,9 @@ class DroneProvider extends ChangeNotifier {
   /// Temporarily repositions the drone to hold over a point WITHOUT
   /// abandoning the active mission — PX4 resumes the mission from where
   /// it left off once this completes or is cancelled. This is the
-  /// mechanism behind "drone breaks from route to investigate something."
-  /// Different from flyTo(), which uses a raw guided setpoint and
-  /// generally requires leaving mission mode entirely.
+  /// mechanism behind "drone breaks from route to investigate/respond
+  /// to something," used by both the temporary investigate hold and the
+  /// indefinite panic hold in MissionProvider.
   /// NOT YET BENCH-TESTED — verify this actually holds mission state
   /// correctly on your PX4 version before relying on it for a demo.
   void reposition({required double lat, required double lng, required double alt}) {
@@ -374,6 +382,29 @@ class DroneProvider extends ChangeNotifier {
   bool _takingOff = true;
   int _takeoffStep = 0;
 
+  List<PatrolWaypoint>? _mockRoute;
+  int _mockWaypointIndex = 0;
+
+  /// Called by MissionProvider when a route is uploaded in mock mode —
+  /// from here on, the mock drone actually flies these waypoints
+  /// instead of jittering around a fixed point. This is what makes
+  /// mock-mode testing honest: position is driven by the real uploaded
+  /// route, same as real PX4 flying a real mission — not a coincidence.
+  void setMockRoute(List<PatrolWaypoint> waypoints) {
+    _mockRoute = waypoints;
+    _mockWaypointIndex = 0;
+  }
+  bool _routeAdvancing = false;
+
+  /// Called by MissionProvider when the mock mission actually starts —
+  /// only from here does the drone advance along its route.
+  void resumeMockRoute() => _routeAdvancing = true;
+
+  /// Called by MissionProvider when the mission completes or is stopped —
+  /// freezes the drone in its current spot instead of continuing to
+  /// wander the route on a timer disconnected from the real mission state.
+  void pauseMockRoute() => _routeAdvancing = false;
+
   void _connectMock() {
     statusMessage = 'Mock drone connected';
     isConnected = true;
@@ -390,16 +421,27 @@ class DroneProvider extends ChangeNotifier {
         altitude += 0.5;
         if (_takeoffStep >= 40) _takingOff = false;
       } else {
-        // Jitter around the focus point if focusing, otherwise the
-        // default demo patrol area.
-        final centerLat = (isFocusing && _focusLat != null) ? _focusLat! : -33.919;
-        final centerLng = (isFocusing && _focusLng != null) ? _focusLng! : 18.423;
+        if (isFocusing && _focusLat != null && _focusLng != null) {
+          // Dispatched somewhere (panic/investigate/verified pattern) —
+          // takes priority over the patrol route, same as a real drone
+          // breaking from its mission to respond to something.
+          latitude = _focusLat! + (_random.nextDouble() * 0.0002 - 0.0001);
+          longitude = _focusLng! + (_random.nextDouble() * 0.0002 - 0.0001);
+        } else if (_routeAdvancing && _mockRoute != null && _mockRoute!.isNotEmpty) {
+          _advanceAlongMockRoute();
+        } else if (_mockRoute != null && _mockRoute!.isNotEmpty) {
+          // Route exists but not actively advancing (mission complete/stopped) —
+          // hold current position rather than resetting or drifting.
+        } else {
+
+          // No route uploaded yet — fallback jitter so the map isn't empty
+          latitude = -33.919 + (_random.nextDouble() * 0.0004 - 0.0002);
+          longitude = 18.423 + (_random.nextDouble() * 0.0004 - 0.0002);
+        }
 
         altitude = 20.0 + (_random.nextDouble() * 2 - 1);
         speed = 2 + _random.nextInt(4).toDouble();
         batteryLevel = (batteryLevel - 1).clamp(0, 100);
-        latitude = centerLat + (_random.nextDouble() * 0.0004 - 0.0002);
-        longitude = centerLng + (_random.nextDouble() * 0.0004 - 0.0002);
         gpsSatellites = 12 + _random.nextInt(4);
         if (batteryLevel <= 10) {
           statusMessage = 'Low battery - returning home';
@@ -407,6 +449,26 @@ class DroneProvider extends ChangeNotifier {
       }
       notifyListeners();
     });
+  }
+
+  /// Moves the mock drone one step toward its current target waypoint;
+  /// advances to the next waypoint on arrival, looping back to the
+  /// start once the route completes — same as a real patrol repeating.
+  void _advanceAlongMockRoute() {
+    final target = _mockRoute![_mockWaypointIndex];
+    final dLat = target.latitude - latitude;
+    final dLng = target.longitude - longitude;
+    final dist = sqrt(dLat * dLat + dLng * dLng);
+
+    const step = 0.00006; // tune if it moves too fast/slow for testing
+    if (dist < step) {
+      latitude = target.latitude;
+      longitude = target.longitude;
+      _mockWaypointIndex = (_mockWaypointIndex + 1) % _mockRoute!.length;
+    } else {
+      latitude += dLat / dist * step;
+      longitude += dLng / dist * step;
+    }
   }
 
   // -------------------------------------------------------------------------

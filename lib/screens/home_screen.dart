@@ -1032,25 +1032,32 @@ class _PanicButton extends StatelessWidget {
     final detection = context.read<DetectionProvider>();
 
     return GestureDetector(
-
       onTap: drone.isConnected
           ? () {
-              // Trigger critical alert
+              // (0.0, 0.0) means no GPS fix yet — still trigger the
+              // alert, just don't dispatch to a meaningless coordinate.
+              final hasFix = drone.latitude != 0.0 || drone.longitude != 0.0;
+
+              // triggerPanic logs the alert AND, if it has a real fix,
+              // fires onPanicDispatchRequested — wired in main.dart to
+              // mission.dispatchToPanic(), which interrupts whatever
+              // the drone is currently doing (patrol, investigate hold)
+              // and holds indefinitely until the operator resumes.
               detection.triggerPanic(
-                lat: drone.latitude,
-                lng: drone.longitude,
+                lat: hasFix ? drone.latitude : null,
+                lng: hasFix ? drone.longitude : null,
               );
-              // TODO: Fly drone TO the panic location, not home
-              // drone.flyTo(lat: panicLat, lng: panicLng);
+
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(' Panic triggered. Drone dispatching to location'),
+                SnackBar(
+                  content: Text(hasFix
+                      ? 'Panic triggered. Drone dispatching to location'
+                      : 'Panic triggered. Alert logged — no GPS fix yet, drone not dispatched'),
                   backgroundColor: SGTColors.danger,
                 ));
             }
           : null,
 
-      
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 14),
@@ -1066,7 +1073,7 @@ class _PanicButton extends StatelessWidget {
               color: drone.isConnected
                   ? SGTColors.danger : SGTColors.danger.withOpacity(0.4)),
             const SizedBox(width: 8),
-            Text('PANIC — RETURN HOME',
+            Text('PANIC - DISPATCH DRONE',
               style: TextStyle(
                 fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w500,
                 color: drone.isConnected

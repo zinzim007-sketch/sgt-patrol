@@ -906,82 +906,167 @@ class _MissionControls extends StatelessWidget {
           ),
         ),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'MISSION STATUS',
-                  style: TextStyle(
-                    fontSize: 8,
-                    letterSpacing: 1.2,
-                    color: SGTColors.textMuted,
+          if (mission.isHolding) ...[
+            _HoldBanner(mission: mission, drone: drone),
+            const SizedBox(height: 10),
+          ],
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'MISSION STATUS',
+                      style: TextStyle(
+                        fontSize: 8,
+                        letterSpacing: 1.2,
+                        color: SGTColors.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      mission.statusMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: SGTColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 18),
+              SizedBox(
+                width: 105,
+                child: _MissionBtn(
+                  icon: Icons.upload_outlined,
+                  label: 'UPLOAD',
+                  enabled: drone.isConnected &&
+                      mission.canUpload &&
+                      activeRoute.waypoints.isNotEmpty,
+                  onTap: () => mission.uploadMission(
+                    activeRoute,
+                    useMock: drone.useMock,
+                    drone: drone,
                   ),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  mission.statusMessage,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 10,
-                    color: SGTColors.textSecondary,
+              ),
+              const SizedBox(width: 7),
+              SizedBox(
+                width: 105,
+                child: _MissionBtn(
+                  icon: Icons.play_arrow,
+                  label: 'START',
+                  enabled: drone.isConnected && mission.canStart,
+                  primary: true,
+                  onTap: () => mission.startMission(
+                    useMock: drone.useMock,
+                    drone: drone,
                   ),
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 18),
-          SizedBox(
-            width: 105,
-            child: _MissionBtn(
-              icon: Icons.upload_outlined,
-              label: 'UPLOAD',
-              enabled: drone.isConnected &&
-                  mission.canUpload &&
-                  activeRoute.waypoints.isNotEmpty,
-              onTap: () => mission.uploadMission(
-                activeRoute,
-                useMock: drone.useMock,
-                drone: drone,
               ),
-            ),
-          ),
-          const SizedBox(width: 7),
-          SizedBox(
-            width: 105,
-            child: _MissionBtn(
-              icon: Icons.play_arrow,
-              label: 'START',
-              enabled: drone.isConnected && mission.canStart,
-              primary: true,
-              onTap: () => mission.startMission(
-                useMock: drone.useMock,
-                drone: drone,
+              const SizedBox(width: 7),
+              SizedBox(
+                width: 105,
+                child: _MissionBtn(
+                  icon: Icons.stop,
+                  label: 'STOP',
+                  enabled: drone.isConnected && mission.canStop,
+                  danger: mission.canStop,
+                  onTap: () => mission.stopMission(
+                    useMock: drone.useMock,
+                    drone: drone,
+                  ),
+                ),
               ),
-            ),
-          ),
-          const SizedBox(width: 7),
-          SizedBox(
-            width: 105,
-            child: _MissionBtn(
-              icon: Icons.stop,
-              label: 'STOP',
-              enabled: drone.isConnected && mission.canStop,
-              danger: mission.canStop,
-              onTap: () => mission.stopMission(
-                useMock: drone.useMock,
-                drone: drone,
-              ),
-            ),
+            ],
           ),
         ],
       ),
     );
   }
 }
+
+/// Shown whenever the drone has broken from its route to hold somewhere
+/// — either a temporary investigate hold (auto-resumes) or a panic
+/// dispatch (holds indefinitely until the operator explicitly resumes).
+class _HoldBanner extends StatelessWidget {
+  final MissionProvider mission;
+  final DroneProvider drone;
+  const _HoldBanner({required this.mission, required this.drone});
+
+  @override
+  Widget build(BuildContext context) {
+    final isPanic = mission.isPanicHold;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: isPanic ? SGTColors.dangerBg : SGTColors.blue.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: isPanic ? const Color(0xFF5a1a1a) : SGTColors.blueLight,
+          width: 0.5,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isPanic ? Icons.crisis_alert : Icons.search,
+            size: 16,
+            color: isPanic ? SGTColors.danger : SGTColors.blueMuted,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              isPanic
+                  ? 'PANIC RESPONSE — holding at location. Resume when resolved.'
+                  : 'Investigating — will resume patrol automatically.',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w500,
+                color: isPanic ? SGTColors.danger : SGTColors.blueMuted,
+              ),
+            ),
+          ),
+          // Only panic needs a manual resume — investigate holds clear
+          // themselves on a timer.
+          if (isPanic)
+            GestureDetector(
+              onTap: () => mission.resumePatrol(useMock: drone.useMock, drone: drone),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: SGTColors.surfaceRaised,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: SGTColors.danger, width: 0.5),
+                ),
+                child: const Text(
+                  'RESUME PATROL',
+                  style: TextStyle(fontSize: 9, letterSpacing: 1.0, color: SGTColors.danger, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
 
 class _MissionBtn extends StatelessWidget {
   final IconData icon;

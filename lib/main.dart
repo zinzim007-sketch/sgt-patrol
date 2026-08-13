@@ -7,12 +7,10 @@ import 'providers/drone_provider.dart';
 import 'providers/mission_provider.dart';
 import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
+import 'screens/intelligence_screen.dart';
 import 'screens/mission_screen.dart';
-import 'screens/routes_screen.dart';
-import 'screens/login_screen.dart';
 import 'providers/ros_provider.dart';
 import 'providers/route_provider.dart';
-import 'screens/settings_screen.dart';
 
 
 
@@ -22,7 +20,6 @@ void main() {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => OperatorSession()),
         ChangeNotifierProvider(create: (_) {
           print('[SGT] Creating RouteProvider');
           return RouteProvider();
@@ -55,11 +52,7 @@ void main() {
 
       // _ProviderWiring connects DetectionProvider and DroneProvider
       // together once both exist — see class below.
-
-      child: const _ProviderWiring(
-        child: SGTPatrolApp(),
-      ),
-      
+      child: const _ProviderWiring(child: SGTPatrolApp()),
     ),
   );
 }
@@ -140,13 +133,12 @@ final _router = GoRouter(
   initialLocation: '/',
   routes: [
     ShellRoute(
-      builder: (context, state, child) => AuthGate(
-        child: AppShell(child: child),
-      ),
+      builder: (context, state, child) => AppShell(child: child),
       routes: [
         GoRoute(path: '/', builder: (_, __) => const HomeScreen()),
         GoRoute(path: '/mission', builder: (_, __) => const MissionScreen()),
         GoRoute(path: '/routes', builder: (_, __) => const RoutesScreen()),
+        GoRoute(path: '/intelligence', builder: (_, __) => const IntelligenceScreen()),
         GoRoute(path: '/settings', builder: (_, __) => const SettingsScreen()),
       ],
     ),
@@ -158,15 +150,12 @@ class SGTPatrolApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-
     return MaterialApp.router(
       title: 'SGT Patrol',
       debugShowCheckedModeBanner: false,
       theme: SGTTheme.dark,
       routerConfig: _router,
-      
     );
-
   }
 }
 
@@ -182,6 +171,7 @@ class AppShell extends StatelessWidget {
       (icon: Icons.flight, label: 'FLY', path: '/'),
       (icon: Icons.map_outlined, label: 'MISSION', path: '/mission'),
       (icon: Icons.route_outlined, label: 'ROUTES', path: '/routes'),
+      (icon: Icons.analytics_outlined, label: 'INTEL', path: '/intelligence'),
       (icon: Icons.settings_outlined, label: 'SETTINGS', path: '/settings'),
     ];
 
@@ -225,7 +215,18 @@ class AppShell extends StatelessWidget {
   }
 }
 
-// Routes screen lives in screens/routes_screen.dart.
+class RoutesScreen extends StatelessWidget {
+  const RoutesScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(
+    body: Center(child: Text('Routes — coming soon')),
+  );
+}
 
-
-
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+  @override
+  Widget build(BuildContext context) => const Scaffold(
+    body: Center(child: Text('Settings — coming soon')),
+  );
+}

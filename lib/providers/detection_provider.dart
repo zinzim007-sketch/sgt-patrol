@@ -5,6 +5,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/detection_alert.dart';
 import '../models/alert_engine.dart';
 import '../models/site_config.dart';
+import '../models/feedback_stats.dart';
+import '../services/feedback_storage_service.dart';
 
 class DetectionProvider extends ChangeNotifier {
 
@@ -22,6 +24,11 @@ class DetectionProvider extends ChangeNotifier {
   SiteConfig siteConfig = SiteConfig.demo;
   late AlertEngine _engine;
 
+  // Feedback learning — confirm/dismiss history per zone+class, persisted
+  // locally so AlertEngine's adaptive downgrading survives app restarts.
+  final FeedbackStorageService _feedbackStorage = FeedbackStorageService();
+  FeedbackStats _feedbackStats = FeedbackStats();
+
   /// Wire this in app setup to connect pattern-verification to the
   /// drone, e.g.:
   ///   detectionProvider.onFocusRequested = (lat, lng, reason) =>
@@ -30,6 +37,13 @@ class DetectionProvider extends ChangeNotifier {
   /// still logs the confirmation, it just won't move the drone.
   void Function(double lat, double lng, String reason)? onFocusRequested;
   void Function(double lat, double lng)? onInvestigateRequested;
+
+  /// Wire this in main.dart to mission.dispatchToPanic(). Fired from
+  /// triggerPanic() whenever a real GPS fix is available, so panic
+  /// gets the "interrupt anything, hold indefinitely" behavior instead
+  /// of onFocusRequested's re-tasking (which doesn't override an
+  /// active mission the same way).
+  void Function(double lat, double lng)? onPanicDispatchRequested;
 
   /// Live drone position lookup — wire this in main.dart, e.g.:
   ///   detectionProvider.getDronePosition =
@@ -41,11 +55,18 @@ class DetectionProvider extends ChangeNotifier {
 
   DetectionProvider() {
     _engine = AlertEngine(siteConfig: siteConfig);
+    _loadFeedbackStats();
+  }
+
+  Future<void> _loadFeedbackStats() async {
+    _feedbackStats = await _feedbackStorage.load();
+    _engine.feedbackStats = _feedbackStats;
+    notifyListeners();
   }
 
   void setSiteConfig(SiteConfig config) {
     siteConfig = config;
-    _engine = AlertEngine(siteConfig: config);
+    _engine = AlertEngine(siteConfig: config)..feedbackStats = _feedbackStats;
     notifyListeners();
   }
 
@@ -90,6 +111,13 @@ class DetectionProvider extends ChangeNotifier {
       latitude: lat,
       longitude: lng,
     ));
+
+    // Real dispatch — interrupts whatever the drone is currently doing
+    // and holds indefinitely, unlike onFocusRequested's re-tasking.
+    if (lat != null && lng != null) {
+      onPanicDispatchRequested?.call(lat, lng);
+    }
+
     notifyListeners();
   }
 
@@ -101,6 +129,37 @@ class DetectionProvider extends ChangeNotifier {
   // it auto-dispatches the drone the same way the panic button does — no
   // operator verification gate.
   // -------------------------------------------------------------------------
+
+  // Behavioural intelligence event from detector.py.
+  // These events are intentionally review-first; only the established
+  // loitering path is treated as a confirmed dispatch signal.
+  void triggerBehaviour({
+    required String id,
+    required String behaviour,
+    required int confidence,
+    String? reason,
+  }) {
+    final result = _engine.evaluate(
+      detectionClass: DetectionClass.unknown,
+      latitude: _currentDronePosition()?.lat,
+      longitude: _currentDronePosition()?.lng,
+      scenario: ScenarioTrigger.behaviouralWatch,
+    );
+
+    final alert = DetectionAlert(
+      id: id,
+      label: behaviour.replaceAll('_', ' ').toUpperCase(),
+      className: 'behaviour',
+      confidence: confidence,
+      timestamp: DateTime.now(),
+      engineResult: result,
+      latitude: _currentDronePosition()?.lat,
+      longitude: _currentDronePosition()?.lng,
+    );
+    alerts.insert(0, alert);
+    if (alerts.length > 100) alerts.removeLast();
+    notifyListeners();
+  }
 
   void triggerLoitering({
     required String id,
@@ -218,7 +277,6 @@ class DetectionProvider extends ChangeNotifier {
         // Read live, once per batch of detections in this message —
         // not captured once back at connect() time.
         final pos = _currentDronePosition();
-        print('[SGT] Detection batch — drone position: $pos');
 
         final detections = data['detections'] as List<dynamic>? ?? [];
         for (final det in detections) {
@@ -236,6 +294,18 @@ class DetectionProvider extends ChangeNotifier {
     double? lng,
   }) {
     final className = det['class'] as String;
+
+    // Behavioural intelligence events are handled separately from ordinary
+    // object detections so they don't fall through the normal class rules.
+    if (className == 'behaviour') {
+      triggerBehaviour(
+        id: det['id'] as String? ?? 'behaviour_${DateTime.now().millisecondsSinceEpoch}',
+        behaviour: det['behaviour'] as String? ?? 'unusual_activity',
+        confidence: det['confidence'] as int? ?? 0,
+        reason: det['reason'] as String?,
+      );
+      return;
+    }
 
     // Loitering is a distinct, already-confirmed behavioral event —
     // route straight to auto-dispatch instead of the normal zone/time
@@ -312,26 +382,44 @@ class DetectionProvider extends ChangeNotifier {
   // -------------------------------------------------------------------------
 
   /// Operator confirms this was a real detection worth acting on.
-  /// This is the positive training signal for a normal (non-pattern) alert.
+  /// This is the positive training signal for a normal (non-pattern) alert
+  /// — feeds directly into FeedbackStats, which AlertEngine reads to
+  /// adjust future alerts for this same zone+class.
   void confirmAlert(String id) {
     try {
       final alert = alerts.firstWhere((a) => a.id == id);
       alert.confirmed = true;
       alert.dismissed = true;
       _sendOperatorResponse(id, 'confirmed');
+      _recordFeedback(alert, confirmed: true);
       notifyListeners();
     } catch (_) {}
   }
 
   /// Operator dismisses this as a false alarm. This is the negative
   /// training signal — every dismiss is a labelled example too, not
-  /// just a UI action.
+  /// just a UI action. This is what actually drives the alert
+  /// downgrading over time.
   void dismissAlert(String id) {
     try {
-      alerts.firstWhere((a) => a.id == id).dismissed = true;
+      final alert = alerts.firstWhere((a) => a.id == id);
+      alert.dismissed = true;
       _sendOperatorResponse(id, 'dismissed');
+      _recordFeedback(alert, confirmed: false);
       notifyListeners();
     } catch (_) {}
+  }
+
+  void _recordFeedback(DetectionAlert alert, {required bool confirmed}) {
+    final key = alert.engineResult.feedbackKey;
+    if (key == null) return; // scenario/critical/animal alerts aren't tracked
+    if (confirmed) {
+      _feedbackStats.recordConfirm(key);
+    } else {
+      _feedbackStats.recordDismiss(key);
+    }
+    // Fire-and-forget — don't block the UI on disk I/O
+    _feedbackStorage.save(_feedbackStats);
   }
 
   /// For pattern-candidate alerts (recurring presence / unusual vehicle
@@ -344,6 +432,7 @@ class DetectionProvider extends ChangeNotifier {
       alert.confirmed = true;
       alert.dismissed = true;
       _sendOperatorResponse(id, 'confirmed');
+      _recordFeedback(alert, confirmed: true);
 
       final result = alert.engineResult;
       if (result.isPatternCandidate &&

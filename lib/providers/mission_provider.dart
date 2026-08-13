@@ -6,7 +6,6 @@ import 'package:dart_mavlink/dialects/common.dart';
 import '../models/patrol_route.dart';
 import 'drone_provider.dart';
 
-//enum MissionState { idle, uploading, ready, executing, complete, error }
 enum MissionState { idle, uploading, ready, executing, holding, complete, error }
 
 class MissionProvider extends ChangeNotifier {
@@ -15,6 +14,11 @@ class MissionProvider extends ChangeNotifier {
   String statusMessage = 'No mission loaded';
   int currentWaypoint = 0;
   int totalWaypoints = 0;
+
+  /// True when the current hold is a panic dispatch (indefinite, only
+  /// clearable by the operator via resumePatrol()) rather than a
+  /// temporary investigate hold (auto-resumes after its duration).
+  bool isPanicHold = false;
 
   bool get canUpload => state == MissionState.idle ||
       state == MissionState.error ||
@@ -35,6 +39,7 @@ class MissionProvider extends ChangeNotifier {
     notifyListeners();
 
     if (useMock || drone == null) {
+      drone?.setMockRoute(route.waypoints);
       Future.delayed(const Duration(milliseconds: 1500), () {
         state = MissionState.ready;
         statusMessage = 'Mission ready';
@@ -213,6 +218,8 @@ class MissionProvider extends ChangeNotifier {
     notifyListeners();
 
     if (useMock || drone == null) {
+      _mockDrone = drone;
+      drone?.resumeMockRoute();
       _simulateProgress();
       return;
     }
@@ -255,44 +262,106 @@ class MissionProvider extends ChangeNotifier {
     });
   }
 
-    Timer? _holdTimer;
-    MissionState? _stateBeforeHold;
+  // -------------------------------------------------------------------------
+  // Hold / investigate — temporary, auto-resumes
+  // -------------------------------------------------------------------------
 
-    /// Called when a flyby detection is already zone/time-worthy — breaks
-    /// from the active route to hold over the detection's location for
-    /// [duration], giving the loitering check a real window to evaluate
-    /// during. Resumes the previous mission state automatically afterward
-    /// unless something else (like a confirmed pattern) changes state first.
-    void holdAt({
-      required double lat,
-      required double lng,
-      double alt = 20.0,
-      Duration duration = const Duration(seconds: 15),
-      required bool useMock,
-      DroneProvider? drone,
-    }) {
-      if (state != MissionState.executing) return; // only interrupt an active patrol
-      _stateBeforeHold = state;
-      state = MissionState.holding;
-      statusMessage = 'Investigating — holding position...';
-      notifyListeners();
-      print('[SGT] Holding at $lat, $lng for ${duration.inSeconds}s');
+  Timer? _holdTimer;
+  MissionState? _stateBeforeHold;
 
-      if (!useMock && drone != null) {
-        drone.reposition(lat: lat, lng: lng, alt: alt);
-      }
+  /// Called when a flyby detection is already zone/time-worthy — breaks
+  /// from the active route to hold over the detection's location for
+  /// [duration], giving the loitering check a real window to evaluate
+  /// during. Resumes the previous mission state automatically afterward
+  /// unless something else (like a confirmed pattern, or a panic
+  /// dispatch overriding it) changes state first.
+  void holdAt({
+    required double lat,
+    required double lng,
+    double alt = 20.0,
+    Duration duration = const Duration(seconds: 15),
+    required bool useMock,
+    DroneProvider? drone,
+  }) {
+    if (isPanicHold) return; // panic always takes priority
+    if (state != MissionState.executing) return; // only interrupt an active patrol
+    _stateBeforeHold = state;
+    state = MissionState.holding;
+    statusMessage = 'Investigating — holding position...';
+    notifyListeners();
+    print('[SGT] Holding at $lat, $lng for ${duration.inSeconds}s');
 
-      _holdTimer?.cancel();
-      _holdTimer = Timer(duration, () {
-        if (state != MissionState.holding) return; // already changed by something else
-        state = _stateBeforeHold ?? MissionState.executing;
-        statusMessage = 'Resuming patrol...';
-        notifyListeners();
-        print('[SGT] Hold complete — resuming patrol');
-      });
+    drone?.setFocusPoint(lat: lat, lng: lng, reason: 'Investigating');
+    if (!useMock && drone != null) {
+      drone.reposition(lat: lat, lng: lng, alt: alt);
     }
 
-    bool get isHolding => state == MissionState.holding;
+    _holdTimer?.cancel();
+    _holdTimer = Timer(duration, () {
+      if (state != MissionState.holding || isPanicHold) return; // superseded by something else
+      state = _stateBeforeHold ?? MissionState.executing;
+      statusMessage = 'Resuming patrol...';
+      drone?.clearFocus();
+      notifyListeners();
+      print('[SGT] Hold complete — resuming patrol');
+    });
+  }
+
+  bool get isHolding => state == MissionState.holding;
+
+  // -------------------------------------------------------------------------
+  // Panic dispatch — indefinite hold, interrupts any active mission,
+  // only clears when the operator explicitly resumes.
+  // -------------------------------------------------------------------------
+
+  /// Sends the drone to a panic location NOW, regardless of what it's
+  /// currently doing — mid-mission, mid-investigate-hold, idle, all
+  /// interrupted. Unlike holdAt(), this does NOT auto-resume — the
+  /// operator must call resumePatrol() once the situation is resolved.
+  void dispatchToPanic({
+    required double lat,
+    required double lng,
+    double alt = 20.0,
+    required bool useMock,
+    DroneProvider? drone,
+  }) {
+    _holdTimer?.cancel(); // cancel any in-progress investigate hold — panic overrides it
+
+    // Only remember "what to resume" if we're not already mid-panic —
+    // otherwise a second panic trigger while already responding would
+    // overwrite _stateBeforeHold with 'holding', losing the real
+    // original mission state.
+    if (!isPanicHold) {
+      _stateBeforeHold = (state == MissionState.executing || state == MissionState.holding)
+          ? MissionState.executing
+          : state;
+    }
+
+    isPanicHold = true;
+    state = MissionState.holding;
+    statusMessage = 'PANIC — drone dispatched, holding at location';
+    notifyListeners();
+    print('[SGT] Panic dispatch: holding at $lat, $lng indefinitely');
+
+    drone?.setFocusPoint(lat: lat, lng: lng, reason: 'PANIC');
+    if (!useMock && drone != null) {
+      drone.reposition(lat: lat, lng: lng, alt: alt);
+    }
+  }
+
+  /// Operator explicitly resumes the interrupted patrol after a panic
+  /// dispatch is resolved. Also usable to manually end an investigate
+  /// hold early.
+  void resumePatrol({required bool useMock, DroneProvider? drone}) {
+    if (state != MissionState.holding) return;
+    isPanicHold = false;
+    _holdTimer?.cancel();
+    state = _stateBeforeHold ?? MissionState.executing;
+    statusMessage = 'Resuming patrol...';
+    drone?.clearFocus();
+    notifyListeners();
+    print('[SGT] Patrol manually resumed');
+  }
 
   // -------------------------------------------------------------------------
   // Stop mission
@@ -307,7 +376,9 @@ class MissionProvider extends ChangeNotifier {
     currentWaypoint = 0;
     notifyListeners();
 
-    if (!useMock && drone != null) {
+    if (useMock) {
+      drone?.pauseMockRoute();
+    } else if (drone != null) {
       drone.onMissionMessage = null;
       drone.returnToHome((success, message) {
         print('[SGT] RTH after stop: $message');
@@ -315,12 +386,14 @@ class MissionProvider extends ChangeNotifier {
     }
   }
 
+
   // -------------------------------------------------------------------------
   // Mock progress simulation
   // -------------------------------------------------------------------------
 
   Timer? _progressTimer;
   int _step = 0;
+  DroneProvider? _mockDrone;
 
   void _simulateProgress() {
     _step = 0;
@@ -336,6 +409,8 @@ class MissionProvider extends ChangeNotifier {
         state = MissionState.complete;
         statusMessage = 'Patrol complete';
         currentWaypoint = 0;
+        _mockDrone?.pauseMockRoute();
+        _mockDrone = null;
       }
       notifyListeners();
     });
