@@ -21,7 +21,7 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-WSL_IP = '127.0.0.1'   # WSL mirrored networking
+WSL_IP = '172.28.220.76'# WSL mirrored networking
 WSL_PORT = 5001          # UDP port for panic events to WSL
 #HTTP_PORT = 5000
 HTTP_PORT = 8080
