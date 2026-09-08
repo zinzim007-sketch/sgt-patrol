@@ -64,10 +64,22 @@ class GcsClientProvider extends ChangeNotifier {
                           // response is slow (e.g. flaky LTE link)
 
   // ── connection ──
-  bool isConnected = false; // reachable AND vehicle link up (mirrors
-                             // gcs_web.py's `connected` field, i.e. it
-                             // has a live heartbeat from the aircraft —
-                             // not just "Flask responded")
+  // These are two DIFFERENT facts, deliberately kept separate:
+  //   serverReachable — gcs_web.py's Flask server answered our HTTP
+  //                      request. True the moment the laptop-side
+  //                      process is up, regardless of whether a
+  //                      vehicle is plugged in.
+  //   isConnected      — mirrors gcs_web.py's own `connected` field,
+  //                      which additionally requires a LIVE VEHICLE
+  //                      HEARTBEAT. Can be false even while
+  //                      serverReachable is true — e.g. gcs_web.py is
+  //                      running fine but the aircraft is powered off.
+  // Conflating these into one flag reads as "can't reach gcs_web.py"
+  // when actually everything is fine except no vehicle is present —
+  // that ambiguity is exactly what the two-chip UI in home_screen.dart
+  // exists to resolve.
+  bool serverReachable = false;
+  bool isConnected = false;
   String statusMessage = 'Not connected to GCS backend';
   String? lastError;
 
@@ -137,6 +149,7 @@ class GcsClientProvider extends ChangeNotifier {
       await Future.wait([_fetchStatus(), _fetchAlerts()]);
       lastError = null;
     } catch (e) {
+      serverReachable = false;
       isConnected = false;
       statusMessage = 'GCS backend unreachable: $e';
       lastError = e.toString();
@@ -193,6 +206,10 @@ class GcsClientProvider extends ChangeNotifier {
 
     // gcs_web.py's own `connected` flag requires a live vehicle
     // heartbeat, not just that Flask answered — keep that distinction.
+    // serverReachable is true here unconditionally: we only reach this
+    // line after a successful 200 response, so the server is definitely
+    // up, independent of whether a vehicle is talking to it.
+    serverReachable = true;
     isConnected = s['connected'] as bool? ?? false;
     statusMessage = isConnected
         ? 'Connected — ${mode ?? "?"}${armed ? " (ARMED)" : ""}'
@@ -303,6 +320,79 @@ class GcsClientProvider extends ChangeNotifier {
       return 'mode request failed: $e';
     }
   }
+
+  /// Small internal helper — every remaining command follows the same
+  /// shape (POST json, parse error out of the body, refresh state on
+  /// success). Kept private so each public method above stays readable
+  /// and shows its own field names explicitly rather than hiding behind
+  /// a generic Map<String, dynamic> signature.
+  Future<String?> _post(String path, Map<String, dynamic> body) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl$path'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 5));
+      final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode != 200) {
+        return decoded['error'] as String? ?? '$path failed (${res.statusCode})';
+      }
+      await _pollOnce();
+      return null;
+    } catch (e) {
+      return '$path request failed: $e';
+    }
+  }
+
+  /// Arms or disarms. gcs_web.py rejects this outright (403) if
+  /// ALLOW_ARM is false in its own config — that's a server-side
+  /// safety switch, not something this provider can override.
+  Future<String?> arm({bool arm = true}) => _post('/api/arm', {'arm': arm});
+
+  Future<String?> disarm() => arm(arm: false);
+
+  /// Commands takeoff to [altMeters]. Requires the vehicle already
+  /// armed and in GUIDED — gcs_web.py's require(guided: true, armed:
+  /// true) enforces this server-side and returns a specific error
+  /// (e.g. "must be armed", "must be in GUIDED") if not.
+  Future<String?> takeoff(double altMeters) =>
+      _post('/api/takeoff', {'alt': altMeters});
+
+  /// Holds current lat/lon, changes height to [altMeters]. Position is
+  /// snapshotted server-side at the moment this is sent — see
+  /// gcs_web.py's api_altitude() docstring.
+  Future<String?> goToAltitude(double altMeters) =>
+      _post('/api/altitude', {'alt': altMeters});
+
+  /// Flies to an arbitrary lat/lon at optional altitude (defaults to
+  /// current altitude server-side if omitted). NOTE, from gcs_web.py's
+  /// own comment: nothing here bounds horizontal distance the way
+  /// dispatch() does via MAX_DISPATCH_M — the flight controller's own
+  /// geofence (FENCE_*) is the actual backstop for a bad coordinate.
+  Future<String?> goTo({required double lat, required double lon, double? altMeters}) =>
+      _post('/api/goto', {'lat': lat, 'lon': lon, if (altMeters != null) 'alt': altMeters});
+
+  /// Yaws to an absolute heading in degrees (0-360). [rateDegPerSec]
+  /// and [clockwise] mirror gcs_web.py's optional rate/direction
+  /// params; defaults match the server's own defaults (25 deg/s, CW).
+  Future<String?> yawTo(double headingDeg,
+          {double rateDegPerSec = 25, bool clockwise = true}) =>
+      _post('/api/yaw', {
+        'heading': headingDeg,
+        'rate': rateDegPerSec,
+        'direction': clockwise ? 1 : -1,
+      });
+
+  /// Bounded, disarmed-only motor spin test. [motor] is 1-based; 0
+  /// means all motors in sequence. Server hard-caps throttle/duration
+  /// regardless of what's passed here (MOTOR_TEST_MAX_PCT /
+  /// MOTOR_TEST_MAX_SEC in gcs_web.py) — PROPS MUST BE OFF, same
+  /// warning gcs_web.py logs server-side when this fires.
+  Future<String?> motorTest({int motor = 0, double throttlePct = 8, double seconds = 2}) =>
+      _post('/api/motortest',
+          {'motor': motor, 'throttle': throttlePct, 'seconds': seconds});
 
   @override
   void dispose() {

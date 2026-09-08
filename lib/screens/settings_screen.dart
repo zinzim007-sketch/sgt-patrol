@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../theme/theme.dart';
 import '../providers/drone_provider.dart';
+import '../widgets/gcs_control_panel.dart';
 import 'login_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -134,6 +135,40 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+
+          const SizedBox(height: 24),
+
+          const _SectionLabel('GCS CONTROL'),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF2a1f00),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0xFF5a3a00), width: 0.5),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, size: 14, color: SGTColors.warning),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Commands below act on the real aircraft via gcs_web.py.',
+                    style: TextStyle(fontSize: 10, color: SGTColors.warning),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // GcsControlPanel already renders its own internal "GCS
+          // CONTROL" label (for the Fly-tab sidebar context it was
+          // originally built for) — that's fine sitting inside this
+          // card too, just a touch redundant with the _SectionLabel
+          // above it. Left as-is rather than forking the widget.
+          _SettingsCard(
+            child: const GcsControlPanel(),
           ),
 
           const SizedBox(height: 30),

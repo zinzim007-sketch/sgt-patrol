@@ -259,29 +259,52 @@ class _TopBar extends StatelessWidget {
                   ],
                 ),
               ),
+            // Split into two chips on purpose: gcs_web.py being up and a
+            // vehicle actually talking to it are different facts, and
+            // collapsing them into one label read as "can't reach
+            // gcs_web.py" when actually the server was fine and there
+            // was just no aircraft powered on.
             Container(
               margin: const EdgeInsets.only(right: 6),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: gcs.isConnected ? SGTColors.onlineBg : SGTColors.dangerBg,
+                color: gcs.serverReachable ? SGTColors.onlineBg : SGTColors.dangerBg,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: gcs.isConnected
+                  color: gcs.serverReachable
                       ? const Color(0xFF1a5c35) : const Color(0xFF5a1a1a),
                   width: 0.5),
               ),
-              // Separate from the LIVE/OFFLINE chip below: that one is
-              // DroneProvider's own raw MAVLink socket. This one is
-              // whether gcs_web.py itself is reachable AND has a live
-              // vehicle heartbeat — the two connections are independent,
-              // so this can read GCS while the other reads OFFLINE, or
-              // vice versa, and that's expected, not a bug.
               child: Text(
-                gcs.isConnected ? 'GCS' : 'GCS OFFLINE',
+                gcs.serverReachable ? 'GCS' : 'GCS OFFLINE',
                 style: TextStyle(
                   fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
-                  color: gcs.isConnected ? SGTColors.online : SGTColors.danger)),
+                  color: gcs.serverReachable ? SGTColors.online : SGTColors.danger)),
             ),
+            if (gcs.serverReachable)
+              Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: gcs.isConnected
+                      ? SGTColors.onlineBg : const Color(0xFF2a1f00),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: gcs.isConnected
+                        ? const Color(0xFF1a5c35) : const Color(0xFF5a3a00),
+                    width: 0.5),
+                ),
+                // Amber, not red: an unreachable server (chip above) is a
+                // real problem to fix. No vehicle heartbeat while the
+                // server IS reachable is often just "aircraft powered
+                // off" — expected during ground testing, not an error.
+                child: Text(
+                  gcs.isConnected ? 'VEHICLE' : 'NO VEHICLE',
+                  style: TextStyle(
+                    fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
+                    color: gcs.isConnected
+                        ? SGTColors.online : SGTColors.warning)),
+              ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(

@@ -9,6 +9,9 @@ import 'providers/detection_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/intelligence_screen.dart';
 import 'screens/mission_screen.dart';
+import 'screens/settings_screen.dart';
+import 'screens/routes_screen.dart';
+import 'screens/login_screen.dart';
 import 'providers/ros_provider.dart';
 import 'providers/route_provider.dart';
 import 'providers/gemini_provider.dart';
@@ -22,6 +25,10 @@ void main() {
   runApp(
     MultiProvider(
       providers: [
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating OperatorSession');
+          return OperatorSession();
+        }),
         ChangeNotifierProvider(create: (_) {
           print('[SGT] Creating RouteProvider');
           return RouteProvider();
@@ -64,8 +71,7 @@ void main() {
           // points at the real Pixhawk 6C link (not SITL) before trusting
           // any telemetry or dispatch behaviour surfaced through this
           // provider. See gcs_client_provider.dart's header comment.
-          //final provider = GcsClientProvider();
-          final provider = GcsClientProvider(); 
+          final provider = GcsClientProvider();
           provider.connect();
           return provider;
         }),
@@ -185,6 +191,13 @@ class SGTPatrolApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: SGTTheme.dark,
       routerConfig: _router,
+      // AuthGate reads OperatorSession and shows LoginScreen instead of
+      // whatever route was requested until session.isAuthenticated is
+      // true. builder wraps the ROUTED content, so this works with
+      // GoRouter without needing a dedicated /login route or redirect
+      // logic — AuthGate was already written this way, it just was
+      // never actually used anywhere in the app before this.
+      builder: (context, child) => AuthGate(child: child ?? const SizedBox.shrink()),
     );
   }
 }
@@ -245,18 +258,7 @@ class AppShell extends StatelessWidget {
   }
 }
 
-class RoutesScreen extends StatelessWidget {
-  const RoutesScreen({super.key});
-  @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(child: Text('Routes — coming soon')),
-  );
-}
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-  @override
-  Widget build(BuildContext context) => const Scaffold(
-    body: Center(child: Text('Settings — coming soon')),
-  );
-}
+// RoutesScreen and SettingsScreen now come from their real files
+// (screens/routes_screen.dart, screens/settings_screen.dart) — see
+// imports above. Placeholder classes that used to live here and shadow
+// those real screens have been removed.
