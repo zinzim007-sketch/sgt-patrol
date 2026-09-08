@@ -11,6 +11,7 @@ import 'screens/intelligence_screen.dart';
 import 'screens/mission_screen.dart';
 import 'providers/ros_provider.dart';
 import 'providers/route_provider.dart';
+import 'providers/gemini_provider.dart';
 
 
 
@@ -46,8 +47,15 @@ void main() {
             final provider = RosProvider();
             provider.connect();
             return provider;
+
           },
         ),
+        ChangeNotifierProvider(create: (_) {
+        print('[SGT] Creating GeminiProvider');
+        final provider = GeminiProvider();
+        provider.connect();
+        return provider;
+        }),
       ],
 
       // _ProviderWiring connects DetectionProvider and DroneProvider

@@ -8,6 +8,7 @@ import '../providers/detection_provider.dart';
 import '../models/patrol_route.dart';
 import '../models/detection_alert.dart';
 import '../models/site_config.dart';
+import '../providers/gemini_provider.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -285,6 +286,10 @@ class _VideoFeed extends StatelessWidget {
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
     final detection = context.watch<DetectionProvider>();
+    
+    final gemini = context.watch<GeminiProvider>();
+
+
 
     return Container(
       
@@ -315,6 +320,11 @@ class _VideoFeed extends StatelessWidget {
                 ],
               ),
             ),
+          Positioned(
+            top: 14,
+            right: 14,
+            child: _GeminiPanel(gemini: gemini),
+          ),
           ..._cornerBrackets(),
           Positioned(
             bottom: 10, left: 14,
@@ -1081,6 +1091,238 @@ class _PanicButton extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _GeminiPanel extends StatelessWidget {
+  final GeminiProvider gemini;
+
+  const _GeminiPanel({
+    required this.gemini,
+  });
+
+  Color _statusColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'CONCERNING':
+        return Colors.redAccent;
+      case 'WATCH':
+        return Colors.orangeAccent;
+      default:
+        return Colors.greenAccent;
+    }
+  }
+
+  Color _riskColor(String risk) {
+    switch (risk.toUpperCase()) {
+      case 'HIGH':
+        return Colors.redAccent;
+      case 'MEDIUM':
+        return Colors.orangeAccent;
+      default:
+        return Colors.greenAccent;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = _statusColor(gemini.sceneStatus);
+    final riskColor = _riskColor(gemini.riskLevel);
+
+    return Container(
+      width: 285,
+      constraints: const BoxConstraints(
+        maxHeight: 285,
+      ),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xE8101828),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: statusColor.withOpacity(0.45),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.35),
+            blurRadius: 16,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: gemini.isConnected
+                      ? Colors.greenAccent
+                      : Colors.redAccent,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                'GEMINI AI',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                gemini.isConnected ? 'LIVE' : 'OFFLINE',
+                style: TextStyle(
+                  color: gemini.isConnected
+                      ? Colors.greenAccent
+                      : Colors.redAccent,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 12),
+
+          Row(
+            children: [
+              const Text(
+                'SCENE',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 9,
+                  letterSpacing: 1,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                gemini.sceneStatus,
+                style: TextStyle(
+                  color: statusColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 7),
+
+          Row(
+            children: [
+              const Text(
+                'RISK',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 9,
+                  letterSpacing: 1,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                gemini.riskLevel,
+                style: TextStyle(
+                  color: riskColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          Row(
+            children: [
+              _GeminiMetric(
+                label: 'PEOPLE',
+                value: '${gemini.peopleCount}',
+              ),
+              const SizedBox(width: 18),
+              _GeminiMetric(
+                label: 'VEHICLES',
+                value: '${gemini.vehicleCount}',
+              ),
+              const SizedBox(width: 18),
+              _GeminiMetric(
+                label: 'CONF',
+                value: '${(gemini.confidence * 100).round()}%',
+              ),
+            ],
+          ),
+
+          if (gemini.interaction != 'NONE' ||
+              gemini.concern != 'NONE') ...[
+            const SizedBox(height: 10),
+            Text(
+              gemini.interaction != 'NONE'
+                  ? gemini.interaction
+                  : gemini.concern,
+              style: TextStyle(
+                color: riskColor,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 10),
+
+          Text(
+            gemini.summary,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 11,
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+class _GeminiMetric extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _GeminiMetric({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 8,
+            letterSpacing: 1,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
     );
   }
 }
