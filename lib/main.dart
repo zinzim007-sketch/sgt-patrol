@@ -12,6 +12,7 @@ import 'screens/mission_screen.dart';
 import 'providers/ros_provider.dart';
 import 'providers/route_provider.dart';
 import 'providers/gemini_provider.dart';
+import 'providers/gcs_client_provider.dart';
 
 
 
@@ -55,6 +56,18 @@ void main() {
         final provider = GeminiProvider();
         provider.connect();
         return provider;
+        }),
+        ChangeNotifierProvider(create: (_) {
+          print('[SGT] Creating GcsClientProvider');
+          // Panic alerts + dispatch, backed by gcs_web.py on the laptop.
+          // HARDWARE TEST NOTE: confirm gcs_web.py's own CONNECT setting
+          // points at the real Pixhawk 6C link (not SITL) before trusting
+          // any telemetry or dispatch behaviour surfaced through this
+          // provider. See gcs_client_provider.dart's header comment.
+          //final provider = GcsClientProvider();
+          final provider = GcsClientProvider(); 
+          provider.connect();
+          return provider;
         }),
       ],
 
@@ -129,6 +142,15 @@ class _ProviderWiringState extends State<_ProviderWiring> {
         // DetectionProvider already handles alerts via WebSocket
         // This is a secondary ROS 2 path for non-video detections
       };
+
+      // Panic-button dispatch is NOT wired here on purpose. gcs_web.py
+      // polls the VM for pending panic alerts and exposes them via
+      // GcsClientProvider.alerts (context.watch/read<GcsClientProvider>()
+      // in whichever screen shows the alerts panel). That screen should
+      // call gcs.dispatch(lat: ..., lon: ..., id: ...) directly, behind
+      // an explicit operator confirmation — same as gcs_web.py's own
+      // built-in UI requires before dispatching. No automatic hand-off
+      // from detection/ROS into a real flight command belongs here.
 
       _wired = true;
     }

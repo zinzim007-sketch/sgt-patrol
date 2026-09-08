@@ -9,6 +9,8 @@ import '../models/patrol_route.dart';
 import '../models/detection_alert.dart';
 import '../models/site_config.dart';
 import '../providers/gemini_provider.dart';
+import '../providers/gcs_client_provider.dart';
+import '../widgets/remote_alert_panel.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -68,6 +70,8 @@ class HomeScreen extends StatelessWidget {
                                   const SizedBox(height: 16),
                                   _AlertPanel(),
                                   const SizedBox(height: 18),
+                                  const RemoteAlertPanel(),
+                                  const SizedBox(height: 18),
                                   _MissionCard(),
                                   const SizedBox(height: 18),
                                   _ActionButtons(),
@@ -98,6 +102,8 @@ class HomeScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 14),
                               _AlertPanel(),
+                              const SizedBox(height: 14),
+                              const RemoteAlertPanel(),
                               const SizedBox(height: 14),
                               _MissionCard(),
                               const SizedBox(height: 14),
@@ -177,6 +183,7 @@ class _TopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
     final detection = context.watch<DetectionProvider>();
+    final gcs = context.watch<GcsClientProvider>();
 
     return SafeArea(
       bottom: false,
@@ -252,6 +259,29 @@ class _TopBar extends StatelessWidget {
                   ],
                 ),
               ),
+            Container(
+              margin: const EdgeInsets.only(right: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: gcs.isConnected ? SGTColors.onlineBg : SGTColors.dangerBg,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: gcs.isConnected
+                      ? const Color(0xFF1a5c35) : const Color(0xFF5a1a1a),
+                  width: 0.5),
+              ),
+              // Separate from the LIVE/OFFLINE chip below: that one is
+              // DroneProvider's own raw MAVLink socket. This one is
+              // whether gcs_web.py itself is reachable AND has a live
+              // vehicle heartbeat — the two connections are independent,
+              // so this can read GCS while the other reads OFFLINE, or
+              // vice versa, and that's expected, not a bug.
+              child: Text(
+                gcs.isConnected ? 'GCS' : 'GCS OFFLINE',
+                style: TextStyle(
+                  fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
+                  color: gcs.isConnected ? SGTColors.online : SGTColors.danger)),
+            ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
