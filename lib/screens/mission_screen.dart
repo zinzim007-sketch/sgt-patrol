@@ -6,7 +6,9 @@ import '../theme/theme.dart';
 import '../providers/drone_provider.dart';
 import '../providers/mission_provider.dart';
 import '../providers/route_provider.dart';
+import '../providers/gcs_client_provider.dart';
 import '../models/patrol_route.dart';
+
 
 class MissionScreen extends StatefulWidget {
   const MissionScreen({super.key});
@@ -165,9 +167,12 @@ class _MissionScreenState extends State<MissionScreen> {
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
     final mission = context.watch<MissionProvider>();
+    final gcs = context.watch<GcsClientProvider>();
 
-    final centerLat = drone.latitude != 0.0 ? drone.latitude : -33.919;
-    final centerLng = drone.longitude != 0.0 ? drone.longitude : 18.423;
+    final centerLat = gcs.latitude ?? -33.919;
+    final centerLng = gcs.longitude ?? 18.423;
+
+    
     final route = _activeRoute;
 
     return Scaffold(
@@ -188,12 +193,12 @@ class _MissionScreenState extends State<MissionScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
-                color: drone.isConnected
+                color: gcs.isConnected
                     ? SGTColors.online.withOpacity(0.10)
                     : SGTColors.surfaceRaised,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: drone.isConnected
+                  color: gcs.isConnected
                       ? SGTColors.online.withOpacity(0.35)
                       : SGTColors.border,
                   width: 0.5,
@@ -207,18 +212,18 @@ class _MissionScreenState extends State<MissionScreen> {
                     height: 6,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: drone.isConnected
+                      color: gcs.isConnected
                           ? SGTColors.online
                           : SGTColors.textMuted,
                     ),
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    drone.isConnected ? 'DRONE CONNECTED' : 'NO CONNECTION',
+                    gcs.isConnected ? 'DRONE CONNECTED' : 'NO CONNECTION',
                     style: TextStyle(
                       fontSize: 8,
                       letterSpacing: 1.0,
-                      color: drone.isConnected
+                      color: gcs.isConnected
                           ? SGTColors.online
                           : SGTColors.textMuted,
                     ),
@@ -253,9 +258,9 @@ class _MissionScreenState extends State<MissionScreen> {
             label: 'TEST HOLD',
             onTap: () {
               final drone = context.read<DroneProvider>();
-              if (drone.latitude == 0.0) return;
+              if (gcs.latitude == null) return;
               drone.reposition(
-                lat: drone.latitude + 0.0005,
+                lat: gcs.latitude! + 0.0005,
                 lng: drone.longitude,
                 alt: 20,
               );
@@ -455,12 +460,12 @@ class _MissionScreenState extends State<MissionScreen> {
                           );
                         }),
 
-                        if (drone.latitude != 0.0 &&
-                            drone.longitude != 0.0)
+                        if (gcs.latitude != null &&
+                            gcs.longitude != null)
                           Marker(
                             point: LatLng(
-                              drone.latitude,
-                              drone.longitude,
+                              gcs.latitude!,
+                              gcs.longitude!,
                             ),
                             width: 36,
                             height: 36,
@@ -504,7 +509,7 @@ class _MissionScreenState extends State<MissionScreen> {
                   ),
                 ),
 
-                if (drone.isConnected)
+                if (gcs.isConnected)
                   Positioned(
                     bottom: 16,
                     right: 16,
@@ -534,8 +539,10 @@ class _MissionScreenState extends State<MissionScreen> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            '${drone.latitude.toStringAsFixed(5)}, '
-                            '${drone.longitude.toStringAsFixed(5)}',
+                            '${gcs.latitude?.toStringAsFixed(5) ?? "—"}, '
+                            '${gcs.longitude?.toStringAsFixed(5) ?? "—"}',
+
+                            
                             style: const TextStyle(
                               fontSize: 10,
                               color: SGTColors.textSecondary,
@@ -546,7 +553,7 @@ class _MissionScreenState extends State<MissionScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'ALT ${drone.altitude.toStringAsFixed(1)} m',
+                            'ALT ${gcs.relAltitude?.toStringAsFixed(1) ?? "0.0"} m',
                             style: const TextStyle(
                               fontSize: 9,
                               color: SGTColors.blueMuted,
@@ -893,7 +900,13 @@ class _MissionControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
+    final gcs = context.watch<GcsClientProvider>();
     final mission = context.watch<MissionProvider>();
+
+    // See _ActionButtons in home_screen.dart for the same pattern: real
+    // flight gates on gcs_web.py's connection, mock mode stays on
+    // DroneProvider's simulated state.
+    final flightReady = drone.useMock ? drone.isConnected : gcs.isConnected;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
@@ -946,12 +959,13 @@ class _MissionControls extends StatelessWidget {
                 child: _MissionBtn(
                   icon: Icons.upload_outlined,
                   label: 'UPLOAD',
-                  enabled: drone.isConnected &&
+                  enabled: flightReady &&
                       mission.canUpload &&
                       activeRoute.waypoints.isNotEmpty,
                   onTap: () => mission.uploadMission(
                     activeRoute,
                     useMock: drone.useMock,
+                    gcs: gcs,
                     drone: drone,
                   ),
                 ),
@@ -962,10 +976,11 @@ class _MissionControls extends StatelessWidget {
                 child: _MissionBtn(
                   icon: Icons.play_arrow,
                   label: 'START',
-                  enabled: drone.isConnected && mission.canStart,
+                  enabled: flightReady && mission.canStart,
                   primary: true,
                   onTap: () => mission.startMission(
                     useMock: drone.useMock,
+                    gcs: gcs,
                     drone: drone,
                   ),
                 ),
@@ -976,10 +991,11 @@ class _MissionControls extends StatelessWidget {
                 child: _MissionBtn(
                   icon: Icons.stop,
                   label: 'STOP',
-                  enabled: drone.isConnected && mission.canStop,
+                  enabled: flightReady && mission.canStop,
                   danger: mission.canStop,
                   onTap: () => mission.stopMission(
                     useMock: drone.useMock,
+                    gcs: gcs,
                     drone: drone,
                   ),
                 ),

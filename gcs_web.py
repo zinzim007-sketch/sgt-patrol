@@ -76,11 +76,30 @@ state = {
     'connected': False, 'mode': None, 'armed': False,
     'lat': None, 'lon': None, 'rel_alt': None, 'gs': None,
     'volt': None, 'curr': None, 'sats': None, 'hdop': None,
+    'batt': None, 'hdg': None,
     'mode_chan': 0, 'last_hb': 0.0,
     'msg_rate': 0.0, 'hb_rate': 0.0, 'bad_rate': 0.0, 'ack_ms': None,
 }
 mission = {'active': False, 'phase': 'idle', 'target': None, 'hold': None,
            'dist': None, 'abort': False, 'alert_id': None}
+
+# Waypoint patrol-route mission (MISSION_COUNT / MISSION_ITEM_INT protocol),
+# separate from the panic 'mission' dict above which tracks the dispatch
+# sequencer. 'state' here is this module's own idle/uploading/ready/
+# executing/error, not to be confused with the vehicle telemetry `state`
+# dict above — unfortunate name collision, kept local to this block.
+route_mission = {
+    'state': 'idle', 'total': 0, 'current_wp': 0,
+    'message': 'No mission loaded', 'error': None,
+}
+route_lock = threading.Lock()
+
+# Filled by _pump() as MISSION_REQUEST_INT / MISSION_ACK arrive, drained by
+# _upload_mission() running in its own thread. Kept as plain lists behind
+# route_lock rather than queue.Queue so a fresh upload can clear stale
+# entries left over from a previous, unrelated exchange.
+_mission_request_queue = []
+_mission_ack_queue = []
 pending = {'alerts': [], 'error': None, 'ts': 0.0}
 
 rates = {'count': 0, 'hb': 0, 'bad': 0, 'window': time.time()}
@@ -214,6 +233,8 @@ def _pump():
                 state['lat'] = m.lat / 1e7          # degE7 → degrees
                 state['lon'] = m.lon / 1e7
                 state['rel_alt'] = m.relative_alt / 1000.0   # mm → m above home
+                # hdg is centidegrees, 65535 = unknown.
+                state['hdg'] = m.hdg / 100.0 if m.hdg != 65535 else None
 
             elif t == 'VFR_HUD':
                 state['gs'] = m.groundspeed
@@ -222,6 +243,9 @@ def _pump():
                 state['volt'] = m.voltage_battery / 1000.0   # mV → V
                 state['curr'] = (m.current_battery / 100.0
                                  if m.current_battery >= 0 else None)
+                # battery_remaining is percent, -1 = unknown.
+                state['batt'] = (m.battery_remaining
+                                 if m.battery_remaining >= 0 else None)
 
             elif t == 'GPS_RAW_INT':
                 state['sats'] = m.satellites_visible
@@ -247,6 +271,27 @@ def _pump():
                 note(f'ACK cmd {m.command}: {res} ({rtt:.0f} ms)', lvl)
             else:
                 note(f'ACK cmd {m.command}: {res}', lvl)
+
+        elif t == 'MISSION_ITEM_REACHED':
+            # Fired by the FC during AUTO mission execution. seq 0 is the
+            # home item we upload but never "reach" in a meaningful sense,
+            # so only real waypoints (seq >= 1) update progress.
+            with route_lock:
+                if m.seq >= 1:
+                    route_mission['current_wp'] = m.seq
+                    if (route_mission['state'] == 'executing'
+                            and m.seq >= route_mission['total']):
+                        route_mission['state'] = 'complete'
+                        route_mission['message'] = 'Patrol complete'
+            note(f'waypoint {m.seq} reached', 'good')
+
+        elif t == 'MISSION_ACK':
+            with route_lock:
+                _mission_ack_queue.append(m.type)
+
+        elif t == 'MISSION_REQUEST_INT' or t == 'MISSION_REQUEST':
+            with route_lock:
+                _mission_request_queue.append(m.seq)
 
 
 def hb_loop():
@@ -466,6 +511,152 @@ def run_dispatch(lat, lon, alert_id):
         mission['active'] = False
 
 
+# ─── waypoint mission upload ───────────────────────────────────────────────────
+#
+# ArduCopter mission protocol (MAVLink "mission" microservice), matching the
+# handshake the operator app previously ran itself over a raw MAVLink socket:
+#
+#   GCS  -- MISSION_COUNT(count) -->  FC
+#   FC   -- MISSION_REQUEST_INT(seq) --> GCS      (repeated, seq 0..count-1)
+#   GCS  -- MISSION_ITEM_INT(seq, ...) --> FC
+#   FC   -- MISSION_ACK(type) -->  GCS             (once all items sent)
+#
+# seq 0 is always the home position. ArduCopter fills in home's actual
+# lat/lon/alt itself — the item we send for seq 0 is a placeholder frame,
+# same convention the old Dart _sendHomeWaypoint() used.
+#
+# MAV_MISSION_ACCEPTED = 0 (pymavlink doesn't expose a constant map for
+# this the way it does for MAV_RESULT, so it's decoded inline).
+MAV_MISSION_ACCEPTED = 0
+MISSION_ACK_RESULT = {
+    0: 'ACCEPTED', 1: 'ERROR', 2: 'UNSUPPORTED_FRAME', 3: 'UNSUPPORTED',
+    4: 'NO_SPACE', 5: 'INVALID', 6: 'INVALID_PARAM1', 7: 'INVALID_PARAM2',
+    8: 'INVALID_PARAM3', 9: 'INVALID_PARAM4', 10: 'INVALID_PARAM5_X',
+    11: 'INVALID_PARAM6_Y', 12: 'INVALID_PARAM7', 13: 'INVALID_SEQUENCE',
+    14: 'DENIED',
+}
+
+
+def _send_home_item():
+    """seq 0 — placeholder home item; ArduCopter substitutes real home."""
+    master.mav.mission_item_int_send(
+        master.target_system, master.target_component,
+        0,                                          # seq
+        mavutil.mavlink.MAV_FRAME_GLOBAL,
+        mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+        0, 1,                                       # current, autocontinue
+        0, 0, 0, 0,                                 # param1-4
+        0, 0, 0,                                    # x, y, z
+        mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
+
+
+def _send_waypoint_item(seq, wp):
+    """seq >= 1 — a real patrol waypoint. wp is one dict from the request body."""
+    master.mav.mission_item_int_send(
+        master.target_system, master.target_component,
+        seq,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+        1 if seq == 1 else 0,                       # current (arm first item)
+        1,                                          # autocontinue
+        float(wp.get('hoverSeconds', 0)),            # param1: hold time (s)
+        2.0,                                         # param2: accept radius (m)
+        0,                                            # param3: pass radius
+        float('nan'),                                 # param4: yaw, unchanged
+        int(round(wp['latitude'] * 1e7)),
+        int(round(wp['longitude'] * 1e7)),
+        float(wp.get('altitude', 20.0)),
+        mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
+
+
+def _upload_mission(waypoints):
+    """
+    Runs the full mission upload handshake. Executes in its own thread —
+    mirrors run_dispatch()'s pattern of a background worker driven by
+    route_mission/route_lock instead of blocking a Flask request thread.
+    """
+    total = len(waypoints)
+    try:
+        with route_lock:
+            route_mission.update(state='uploading', total=total,
+                                 current_wp=0, error=None,
+                                 message=f'Uploading mission ({total} waypoints)...')
+            _mission_request_queue.clear()
+            _mission_ack_queue.clear()
+        note(f'mission upload starting — {total} waypoints')
+
+        # +1 for the home item at seq 0.
+        master.mav.mission_count_send(
+            master.target_system, master.target_component,
+            total + 1, mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
+
+        served = set()
+        deadline = time.time() + 30.0
+
+        while time.time() < deadline:
+            with route_lock:
+                if mission_upload_abort['flag']:
+                    route_mission.update(state='error',
+                                         message='Mission upload cancelled',
+                                         error='cancelled')
+                    note('mission upload cancelled', 'warn')
+                    return
+                # Drain any pending requests.
+                pending_seqs = list(_mission_request_queue)
+                _mission_request_queue.clear()
+                acks = list(_mission_ack_queue)
+                _mission_ack_queue.clear()
+
+            for seq in pending_seqs:
+                if seq in served:
+                    continue
+                if seq == 0:
+                    _send_home_item()
+                elif 1 <= seq <= total:
+                    _send_waypoint_item(seq, waypoints[seq - 1])
+                else:
+                    note(f'FC requested out-of-range waypoint {seq}', 'bad')
+                    continue
+                served.add(seq)
+                with route_lock:
+                    route_mission['message'] = (
+                        f'Sending waypoint {seq} / {total}...')
+                note(f'sent waypoint {seq}/{total}')
+
+            if acks:
+                result = acks[-1]
+                if result == MAV_MISSION_ACCEPTED:
+                    with route_lock:
+                        route_mission.update(
+                            state='ready', current_wp=0,
+                            message=f'Mission ready — {total} waypoints uploaded')
+                    note(f'mission accepted — {total} waypoints', 'good')
+                else:
+                    label = MISSION_ACK_RESULT.get(result, str(result))
+                    with route_lock:
+                        route_mission.update(
+                            state='error', error=label,
+                            message=f'Mission upload failed: {label}')
+                    note(f'mission rejected: {label}', 'bad')
+                return
+
+            time.sleep(0.05)
+
+        with route_lock:
+            route_mission.update(state='error', error='timeout',
+                                 message='Mission upload timed out')
+        note('mission upload timed out', 'bad')
+
+    except Exception as exc:
+        with route_lock:
+            route_mission.update(state='error', error=str(exc),
+                                 message=f'Mission upload failed: {exc}')
+        note(f'mission upload failed: {exc}', 'bad')
+
+
+mission_upload_abort = {'flag': False}
+
+
 # ─── endpoints ────────────────────────────────────────────────────────────────
 
 @app.get('/api/status')
@@ -478,6 +669,8 @@ def api_status():
     s['stream_url'] = STREAM_URL
     with lock:
         s['messages'] = list(messages)[:12]
+    with route_lock:
+        s['route_mission'] = dict(route_mission)
     return jsonify(s)
 
 
@@ -552,6 +745,83 @@ def api_abort():
         master.target_system,
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, MODES['LOITER'])
     note('ABORT — dispatch cancelled, LOITER commanded', 'warn')
+    return jsonify(ok=True)
+
+
+# ─── waypoint mission endpoints ────────────────────────────────────────────────
+
+@app.get('/api/mission')
+def api_mission_status():
+    with route_lock:
+        return jsonify(dict(route_mission))
+
+
+@app.post('/api/mission')
+def api_mission_upload():
+    """
+    Upload a patrol route. Body: {"waypoints": [{latitude, longitude,
+    altitude?, hoverSeconds?, gimbalPitch?, takePhoto?}, ...]}.
+
+    Runs the MISSION_COUNT/MISSION_ITEM_INT/MISSION_ACK handshake in a
+    background thread and returns immediately — poll /api/mission or
+    /api/status (route_mission field) for progress, same pattern as
+    /api/dispatch + mission/.
+    """
+    if g := gate():
+        return jsonify(error=g), 403
+    with route_lock:
+        if route_mission['state'] == 'uploading':
+            return jsonify(error='a mission upload is already running'), 409
+
+    d = request.json or {}
+    waypoints = d.get('waypoints')
+    if not isinstance(waypoints, list) or not waypoints:
+        return jsonify(error='waypoints must be a non-empty list'), 400
+
+    for i, wp in enumerate(waypoints):
+        try:
+            lat, lon = float(wp['latitude']), float(wp['longitude'])
+        except (KeyError, TypeError, ValueError):
+            return jsonify(error=f'waypoint {i}: bad or missing lat/lon'), 400
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            return jsonify(error=f'waypoint {i}: coordinates out of range'), 400
+
+    mission_upload_abort['flag'] = False
+    threading.Thread(target=_upload_mission, args=(waypoints,),
+                     daemon=True).start()
+    return jsonify(ok=True, count=len(waypoints))
+
+
+@app.post('/api/mission/cancel')
+def api_mission_cancel():
+    """Cancels an in-progress upload. Does not affect a mission already
+    accepted by the FC — use /api/mode or /api/abort for that."""
+    mission_upload_abort['flag'] = True
+    return jsonify(ok=True)
+
+
+@app.post('/api/mission/start')
+def api_mission_start():
+    """
+    Starts executing the uploaded mission. ArduCopter (unlike PX4) will
+    not fly a mission unless the vehicle is armed AND in AUTO mode, so
+    this sends MISSION_START then switches the mode — both are needed.
+    """
+    if err := require(armed=True):
+        return jsonify(error=err[0]), err[1]
+    with route_lock:
+        if route_mission['state'] != 'ready':
+            return jsonify(error=f"mission not ready "
+                                 f"(state: {route_mission['state']})"), 409
+        route_mission['state'] = 'executing'
+        route_mission['current_wp'] = 0
+        route_mission['message'] = 'Mission executing...'
+
+    _send_command(mavutil.mavlink.MAV_CMD_MISSION_START, 0, 0)
+    master.mav.set_mode_send(
+        master.target_system,
+        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, MODES['AUTO'])
+    note('mission start sent — mode AUTO', 'good')
     return jsonify(ok=True)
 
 

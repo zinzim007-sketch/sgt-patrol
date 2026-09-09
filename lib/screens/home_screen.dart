@@ -10,7 +10,6 @@ import '../models/detection_alert.dart';
 import '../models/site_config.dart';
 import '../providers/gemini_provider.dart';
 import '../providers/gcs_client_provider.dart';
-import '../widgets/remote_alert_panel.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -70,8 +69,6 @@ class HomeScreen extends StatelessWidget {
                                   const SizedBox(height: 16),
                                   _AlertPanel(),
                                   const SizedBox(height: 18),
-                                  const RemoteAlertPanel(),
-                                  const SizedBox(height: 18),
                                   _MissionCard(),
                                   const SizedBox(height: 18),
                                   _ActionButtons(),
@@ -102,8 +99,6 @@ class HomeScreen extends StatelessWidget {
                               ),
                               const SizedBox(height: 14),
                               _AlertPanel(),
-                              const SizedBox(height: 14),
-                              const RemoteAlertPanel(),
                               const SizedBox(height: 14),
                               _MissionCard(),
                               const SizedBox(height: 14),
@@ -213,7 +208,8 @@ class _TopBar extends StatelessWidget {
             const Spacer(),
             if (!drone.useMock)
               Text(
-                '${drone.latitude.toStringAsFixed(4)}, ${drone.longitude.toStringAsFixed(4)}',
+                '${gcs.latitude?.toStringAsFixed(4) ?? "—"}, ${gcs.longitude?.toStringAsFixed(4) ?? "—"}',
+                
                 style: const TextStyle(fontSize: 9, color: const Color(0xFF8C98A8)),
               ),
             // Critical alert badge
@@ -259,67 +255,21 @@ class _TopBar extends StatelessWidget {
                   ],
                 ),
               ),
-            // Split into two chips on purpose: gcs_web.py being up and a
-            // vehicle actually talking to it are different facts, and
-            // collapsing them into one label read as "can't reach
-            // gcs_web.py" when actually the server was fine and there
-            // was just no aircraft powered on.
             Container(
-              margin: const EdgeInsets.only(right: 6),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: gcs.serverReachable ? SGTColors.onlineBg : SGTColors.dangerBg,
+                color: gcs.isConnected ? SGTColors.onlineBg : SGTColors.dangerBg,
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: gcs.serverReachable
-                      ? const Color(0xFF1a5c35) : const Color(0xFF5a1a1a),
-                  width: 0.5),
-              ),
-              child: Text(
-                gcs.serverReachable ? 'GCS' : 'GCS OFFLINE',
-                style: TextStyle(
-                  fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
-                  color: gcs.serverReachable ? SGTColors.online : SGTColors.danger)),
-            ),
-            if (gcs.serverReachable)
-              Container(
-                margin: const EdgeInsets.only(right: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
                   color: gcs.isConnected
-                      ? SGTColors.onlineBg : const Color(0xFF2a1f00),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: gcs.isConnected
-                        ? const Color(0xFF1a5c35) : const Color(0xFF5a3a00),
-                    width: 0.5),
-                ),
-                // Amber, not red: an unreachable server (chip above) is a
-                // real problem to fix. No vehicle heartbeat while the
-                // server IS reachable is often just "aircraft powered
-                // off" — expected during ground testing, not an error.
-                child: Text(
-                  gcs.isConnected ? 'VEHICLE' : 'NO VEHICLE',
-                  style: TextStyle(
-                    fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
-                    color: gcs.isConnected
-                        ? SGTColors.online : SGTColors.warning)),
-              ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: drone.isConnected ? SGTColors.onlineBg : SGTColors.dangerBg,
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(
-                  color: drone.isConnected
                       ? const Color(0xFF1a5c35) : const Color(0xFF5a1a1a),
                   width: 0.5),
               ),
               child: Text(
-                drone.isConnected ? 'LIVE' : 'OFFLINE',
+                gcs.isConnected ? 'LIVE' : 'OFFLINE',
                 style: TextStyle(
                   fontSize: 10, fontWeight: FontWeight.w500, letterSpacing: 1.0,
-                  color: drone.isConnected ? SGTColors.online : SGTColors.danger)),
+                  color: gcs.isConnected ? SGTColors.online : SGTColors.danger)),
 
               
             ),
@@ -341,6 +291,7 @@ class _VideoFeed extends StatelessWidget {
     final detection = context.watch<DetectionProvider>();
     
     final gemini = context.watch<GeminiProvider>();
+    final gcs = context.watch<GcsClientProvider>();
 
 
 
@@ -392,7 +343,7 @@ class _VideoFeed extends StatelessWidget {
                     ? detection.statusMessage : drone.statusMessage,
                 style: const TextStyle(color: const Color(0xFFB8C1CE), fontSize: 10)),
             )),
-          if (drone.isConnected)
+          if (gcs.isConnected)
             Positioned(
               top: 10, right: 14,
               child: Row(
@@ -505,11 +456,12 @@ class _TelemetryBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
+    final gcs = context.watch<GcsClientProvider>();
     final cells = [
-      (label: 'ALT', value: drone.altitude.toStringAsFixed(1), unit: 'm'),
-      (label: 'SPD', value: drone.speed.toStringAsFixed(1), unit: 'm/s'),
-      (label: 'BAT', value: '${drone.batteryLevel}', unit: '%'),
-      (label: 'GPS', value: '${drone.gpsSatellites}', unit: 'sats'),
+      (label: 'ALT', value: gcs.relAltitude?.toStringAsFixed(1) ?? '0.0', unit: 'm'),
+      (label: 'SPD', value: gcs.groundspeed?.toStringAsFixed(1) ?? '0.0', unit: 'm/s'),
+      (label: 'BAT', value: gcs.batteryPercent != null ? '${gcs.batteryPercent}' : '—', unit: '%'),
+      (label: 'GPS', value: gcs.satellites != null ? '${gcs.satellites}' : '—', unit: 'sats'),
     ];
 
     return Container(
@@ -520,7 +472,8 @@ class _TelemetryBar extends StatelessWidget {
       ),
       child: Row(
         children: cells.map((cell) {
-          final isBatLow = cell.label == 'BAT' && drone.batteryLevel <= 20;
+          final isBatLow = cell.label == 'BAT' && (gcs.batteryPercent ?? 100) <= 20;
+          
           return Expanded(
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 12),
@@ -632,6 +585,7 @@ class _AlertCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final detection = context.read<DetectionProvider>();
     final drone = context.read<DroneProvider>();
+    final gcs = context.watch<GcsClientProvider>();
     final result = alert.engineResult;
 
     return Container(
@@ -777,8 +731,8 @@ class _AlertCard extends StatelessWidget {
                   child: GestureDetector(
                     onTap: () => detection.operatorEscalate(
                       alert.id,
-                      lat: drone.latitude,
-                      lng: drone.longitude,
+                      lat: gcs.latitude,
+                      lng: gcs.longitude,
                     ),
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -988,7 +942,15 @@ class _ActionButtons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final drone = context.watch<DroneProvider>();
+    final gcs = context.watch<GcsClientProvider>();
     final mission = context.watch<MissionProvider>();
+
+    // Real flight (mission upload/start/stop, arm, takeoff) is gated on
+    // gcs_web.py's own connection + software gate, not DroneProvider's
+    // socket — matches the rest of the app's move onto GcsClientProvider
+    // as the single MAVLink authority. Mock mode still runs off
+    // DroneProvider's simulated state, same as before.
+    final flightReady = drone.useMock ? drone.isConnected : gcs.isConnected;
 
     return Column(
       children: [
@@ -996,30 +958,32 @@ class _ActionButtons extends StatelessWidget {
           children: [
             Expanded(child: _SGTButton(
               label: 'UPLOAD', icon: Icons.upload_outlined,
-              enabled: drone.isConnected && mission.canUpload,
-              
+              enabled: flightReady && mission.canUpload,
+
               onTap: () => mission.uploadMission(
                               drone.useMock
                                   ? PatrolRoute.defaultRoute
-                                  : PatrolRoute.relativeToPosition(drone.latitude, drone.longitude),
+                                  : PatrolRoute.relativeToPosition(
+                                      gcs.latitude ?? 0.0, gcs.longitude ?? 0.0),
                               useMock: drone.useMock,
+                              gcs: gcs,
                               drone: drone,
                             ),
-                
+
             )),
             const SizedBox(width: 8),
             Expanded(child: _SGTButton(
               label: 'START PATROL', icon: Icons.play_arrow_outlined,
-              enabled: drone.isConnected && mission.canStart,
-              onTap: () => mission.startMission(useMock: drone.useMock, drone: drone),
-              
+              enabled: flightReady && mission.canStart,
+              onTap: () => mission.startMission(useMock: drone.useMock, gcs: gcs, drone: drone),
+
             )),
             const SizedBox(width: 8),
             Expanded(child: _SGTButton(
               label: 'STOP', icon: Icons.stop_outlined,
-              enabled: drone.isConnected && mission.canStop,
-              
-              onTap: () => mission.stopMission(useMock: drone.useMock, drone: drone),
+              enabled: flightReady && mission.canStop,
+
+              onTap: () => mission.stopMission(useMock: drone.useMock, gcs: gcs, drone: drone),
             )),
           ],
         ),
@@ -1028,15 +992,17 @@ class _ActionButtons extends StatelessWidget {
             Expanded(child: _SGTButton(
               label: 'ARM',
               icon: Icons.lock_open_outlined,
-              enabled: drone.isConnected,
-              onTap: () => drone.arm(),
+              enabled: flightReady,
+              onTap: () => drone.useMock ? drone.arm() : gcs.arm(),
             )),
             const SizedBox(width: 8),
             Expanded(child: _SGTButton(
               label: 'TAKEOFF',
               icon: Icons.flight_takeoff_outlined,
-              enabled: drone.isConnected,
-              onTap: () => drone.takeoff(altitude: 10.0),
+              enabled: flightReady,
+              onTap: () => drone.useMock
+                  ? drone.takeoff(altitude: 10.0)
+                  : gcs.takeoff(10.0),
             )),
           ],
         ),
@@ -1093,13 +1059,15 @@ class _PanicButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final detection = context.read<DetectionProvider>();
+    final gcs = context.watch<GcsClientProvider>();
 
     return GestureDetector(
-      onTap: drone.isConnected
+      onTap: gcs.isConnected
           ? () {
               // (0.0, 0.0) means no GPS fix yet — still trigger the
               // alert, just don't dispatch to a meaningless coordinate.
-              final hasFix = drone.latitude != 0.0 || drone.longitude != 0.0;
+              final hasFix = gcs.latitude != null && gcs.longitude != null;
+            
 
               // triggerPanic logs the alert AND, if it has a real fix,
               // fires onPanicDispatchRequested — wired in main.dart to
@@ -1107,8 +1075,8 @@ class _PanicButton extends StatelessWidget {
               // the drone is currently doing (patrol, investigate hold)
               // and holds indefinitely until the operator resumes.
               detection.triggerPanic(
-                lat: hasFix ? drone.latitude : null,
-                lng: hasFix ? drone.longitude : null,
+                lat: hasFix ? gcs.latitude : null,
+                lng: hasFix ? gcs.longitude : null,
               );
 
               ScaffoldMessenger.of(context).showSnackBar(
@@ -1133,13 +1101,13 @@ class _PanicButton extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.crisis_alert, size: 16,
-              color: drone.isConnected
+              color: gcs.isConnected
                   ? SGTColors.danger : SGTColors.danger.withOpacity(0.4)),
             const SizedBox(width: 8),
             Text('PANIC - DISPATCH DRONE',
               style: TextStyle(
                 fontSize: 11, letterSpacing: 1.2, fontWeight: FontWeight.w500,
-                color: drone.isConnected
+                color: gcs.isConnected
                     ? SGTColors.danger : SGTColors.danger.withOpacity(0.4))),
           ],
         ),

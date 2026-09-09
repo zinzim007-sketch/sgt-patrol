@@ -93,6 +93,8 @@ class GcsClientProvider extends ChangeNotifier {
   double? voltage;
   int? satellites;
   double? hdop;
+  int? batteryPercent; // 0-100, null if the FC isn't reporting it
+  double? heading; // degrees, 0-360, null if unknown
 
   // ── link health ──
   double msgRate = 0.0;
@@ -122,6 +124,16 @@ class GcsClientProvider extends ChangeNotifier {
   String missionPhase = 'idle';
   double? missionDistance; // metres remaining, during transit
   String? missionAlertId;
+
+  // ── patrol-route waypoint mission (mirrors gcs_web.py `route_mission`) ──
+  // Distinct from the panic-dispatch fields above — this is
+  // MISSION_COUNT/MISSION_ITEM_INT upload + AUTO-mode execution of the
+  // patrol route, not the ad-hoc GUIDED reposition dispatch does.
+  String routeMissionState = 'idle'; // idle|uploading|ready|executing|complete|error
+  int routeMissionTotal = 0;
+  int routeMissionCurrentWp = 0;
+  String routeMissionMessage = 'No mission loaded';
+  String? routeMissionError;
 
   // ── recent log lines (STATUSTEXT / COMMAND_ACK from the vehicle) ──
   List<GcsLogEntry> log = [];
@@ -183,6 +195,8 @@ class GcsClientProvider extends ChangeNotifier {
     voltage = (s['volt'] as num?)?.toDouble();
     satellites = s['sats'] as int?;
     hdop = (s['hdop'] as num?)?.toDouble();
+    batteryPercent = s['batt'] as int?;
+    heading = (s['hdg'] as num?)?.toDouble();
 
     msgRate = (s['msg_rate'] as num?)?.toDouble() ?? 0.0;
     hbRate = (s['hb_rate'] as num?)?.toDouble() ?? 0.0;
@@ -203,6 +217,13 @@ class GcsClientProvider extends ChangeNotifier {
               level: m['level'] as String? ?? 'info',
             ))
         .toList();
+
+    final rm = s['route_mission'] as Map<String, dynamic>? ?? const {};
+    routeMissionState = rm['state'] as String? ?? 'idle';
+    routeMissionTotal = rm['total'] as int? ?? 0;
+    routeMissionCurrentWp = rm['current_wp'] as int? ?? 0;
+    routeMissionMessage = rm['message'] as String? ?? 'No mission loaded';
+    routeMissionError = rm['error'] as String?;
 
     // gcs_web.py's own `connected` flag requires a live vehicle
     // heartbeat, not just that Flask answered — keep that distinction.
@@ -393,6 +414,61 @@ class GcsClientProvider extends ChangeNotifier {
   Future<String?> motorTest({int motor = 0, double throttlePct = 8, double seconds = 2}) =>
       _post('/api/motortest',
           {'motor': motor, 'throttle': throttlePct, 'seconds': seconds});
+
+  // -------------------------------------------------------------------------
+  // Patrol-route (waypoint) mission
+  // -------------------------------------------------------------------------
+
+  /// Uploads a patrol route to the FC via the MAVLink mission protocol
+  /// (MISSION_COUNT / MISSION_ITEM_INT / MISSION_ACK), run server-side by
+  /// gcs_web.py. Each waypoint map needs 'latitude'/'longitude' and may
+  /// include 'altitude' and 'hoverSeconds' (defaults 20.0 / 0 server-side).
+  ///
+  /// Returns immediately once the server has accepted the request and
+  /// started the handshake in the background — poll routeMissionState /
+  /// routeMissionMessage (refreshed automatically by the normal 500ms
+  /// status poll) to track progress through uploading -> ready or error.
+  Future<String?> uploadMission(List<Map<String, dynamic>> waypoints) =>
+      _post('/api/mission', {'waypoints': waypoints});
+
+  /// Cancels an in-progress upload. Has no effect on a mission the FC has
+  /// already accepted — use setMode('RTL') or abort() for that.
+  Future<String?> cancelMissionUpload() async {
+    try {
+      final res = await http
+          .post(Uri.parse('$baseUrl/api/mission/cancel'))
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        return body['error'] as String? ?? 'cancel failed (${res.statusCode})';
+      }
+      await _pollOnce();
+      return null;
+    } catch (e) {
+      return 'mission cancel request failed: $e';
+    }
+  }
+
+  /// Starts executing an uploaded (routeMissionState == 'ready') mission.
+  /// Requires the vehicle already armed — gcs_web.py enforces this
+  /// server-side and returns a specific error if not. Server sends
+  /// MISSION_START and switches the vehicle to AUTO; ArduCopter won't fly
+  /// the mission in any other mode.
+  Future<String?> startMission() async {
+    try {
+      final res = await http
+          .post(Uri.parse('$baseUrl/api/mission/start'))
+          .timeout(const Duration(seconds: 5));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode != 200) {
+        return body['error'] as String? ?? 'mission start failed (${res.statusCode})';
+      }
+      await _pollOnce();
+      return null;
+    } catch (e) {
+      return 'mission start request failed: $e';
+    }
+  }
 
   @override
   void dispose() {

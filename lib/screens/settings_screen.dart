@@ -5,6 +5,7 @@ import '../theme/theme.dart';
 import '../providers/drone_provider.dart';
 import '../widgets/gcs_control_panel.dart';
 import 'login_screen.dart';
+import '../providers/gcs_client_provider.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -13,6 +14,8 @@ class SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final session = context.watch<OperatorSession>();
     final drone = context.watch<DroneProvider>();
+
+    final gcs = context.watch<GcsClientProvider>();
 
     return Scaffold(
       backgroundColor: SGTColors.navyDeep,
@@ -102,13 +105,17 @@ class SettingsScreen extends StatelessWidget {
                   value: 'SGT-ARGUS001',
                 ),
                 const SizedBox(height: 15),
+
                 _InfoRow(
                   icon: Icons.link_outlined,
                   label: 'STATUS',
-                  value: drone.isConnected ? 'CONNECTED' : 'OFFLINE',
+                  value: gcs.isConnected ? 'CONNECTED' : 'OFFLINE',
                   valueColor:
-                      drone.isConnected ? SGTColors.online : SGTColors.danger,
+                      gcs.isConnected ? SGTColors.online : SGTColors.danger,
                 ),
+
+
+    
               ],
             ),
           ),
@@ -128,8 +135,8 @@ class SettingsScreen extends StatelessWidget {
                 _InfoRow(
                   icon: Icons.shield_outlined,
                   label: 'SYSTEM STATUS',
-                  value: drone.isConnected ? 'OPERATIONAL' : 'CHECK CONNECTION',
-                  valueColor: drone.isConnected
+                  value: gcs.isConnected ? 'OPERATIONAL' : 'CHECK CONNECTION',
+                  valueColor: gcs.isConnected
                       ? SGTColors.online
                       : SGTColors.danger,
                 ),

@@ -12,12 +12,26 @@ class DetectionProvider extends ChangeNotifier {
 
   static const _wsUrl = 'ws://localhost:8765';
 
+  // How often to retry the WebSocket connection while the detection
+  // server (detector.py) isn't reachable yet — e.g. drone/Pi is off,
+  // or detector.py hasn't been started. Fixed interval on purpose:
+  // this app is meant to just sit and watch for the feed to appear
+  // with no operator action required, so we'd rather notice fast
+  // than back off.
+  static const _retryInterval = Duration(seconds: 3);
+
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
+  Timer? _retryTimer;
+
+  // True once the operator has explicitly hit STOP DETECT. Retries are
+  // paused while this is true, so disconnect() actually stops the feed
+  // instead of it silently reconnecting 3 seconds later.
+  bool _manuallyStopped = false;
 
   bool isConnected = false;
   bool isDetecting = false;
-  String statusMessage = 'Detection ready';
+  String statusMessage = 'Waiting for detection server…';
   String? currentFrameBase64;
 
   // Active site config — swap per client deployment
@@ -56,6 +70,10 @@ class DetectionProvider extends ChangeNotifier {
   DetectionProvider() {
     _engine = AlertEngine(siteConfig: siteConfig);
     _loadFeedbackStats();
+    // Start watching for the detection server immediately — no operator
+    // action required. If detector.py isn't up yet (e.g. drone/Pi off),
+    // this will just keep retrying quietly until it is.
+    connect();
   }
 
   Future<void> _loadFeedbackStats() async {
@@ -209,6 +227,9 @@ class DetectionProvider extends ChangeNotifier {
   // -------------------------------------------------------------------------
 
   void connect() {
+    _manuallyStopped = false;
+    _retryTimer?.cancel();
+
     try {
       _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
       isConnected = true;
@@ -219,28 +240,54 @@ class DetectionProvider extends ChangeNotifier {
       _subscription = _channel!.stream.listen(
         _onMessage,
         onError: (error) {
-          statusMessage = 'Connection error — is detector.py running?';
+          statusMessage = 'Detection server unavailable — retrying…';
           isConnected = false;
           isDetecting = false;
+          currentFrameBase64 = null;
           notifyListeners();
+          _scheduleRetry();
         },
         onDone: () {
-          statusMessage = 'Detection server disconnected';
+          // A clean close from the server (e.g. detector.py exited)
+          // looks the same as an error from here on out — keep
+          // watching for it to come back rather than treating this
+          // as final. Manual STOP DETECT goes through disconnect()
+          // instead, which sets _manuallyStopped first.
+          statusMessage = _manuallyStopped
+              ? 'Detection stopped'
+              : 'Detection server unavailable — retrying…';
           isConnected = false;
           isDetecting = false;
+          currentFrameBase64 = null;
           notifyListeners();
+          _scheduleRetry();
         },
       );
     } catch (e) {
-      statusMessage = 'Could not connect — run detector.py first';
+      // WebSocketChannel.connect() itself throwing (e.g. nothing
+      // listening on 8765 at all) — same recovery path as above.
+      statusMessage = 'Detection server unavailable — retrying…';
       isConnected = false;
       isDetecting = false;
       notifyListeners();
+      _scheduleRetry();
     }
   }
 
+  void _scheduleRetry() {
+    if (_manuallyStopped) return;
+    _retryTimer?.cancel();
+    _retryTimer = Timer(_retryInterval, () {
+      if (!_manuallyStopped) connect();
+    });
+  }
+
   void disconnect() {
-    _channel?.sink.add(jsonEncode({'action': 'stop'}));
+    _manuallyStopped = true;
+    _retryTimer?.cancel();
+    try {
+      _channel?.sink.add(jsonEncode({'action': 'stop'}));
+    } catch (_) {}
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
@@ -510,6 +557,7 @@ class DetectionProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _retryTimer?.cancel();
     disconnect();
     super.dispose();
   }

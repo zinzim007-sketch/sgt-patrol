@@ -110,9 +110,10 @@ class _ProviderWiringState extends State<_ProviderWiring> {
       final drone = context.read<DroneProvider>();
       final ros = context.read<RosProvider>();
       final mission = context.read<MissionProvider>();
+      final gcs = context.read<GcsClientProvider>();
 
       detection.onInvestigateRequested = (lat, lng) {
-        mission.holdAt(lat: lat, lng: lng, useMock: drone.useMock, drone: drone);
+        mission.holdAt(lat: lat, lng: lng, useMock: drone.useMock, gcs: gcs, drone: drone);
       };
 
       detection.onFocusRequested = (lat, lng, reason) {

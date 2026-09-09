@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:dart_mavlink/mavlink.dart';
-import 'package:dart_mavlink/dialects/common.dart';
 import '../models/patrol_route.dart';
 import 'drone_provider.dart';
+import 'gcs_client_provider.dart';
 
 enum MissionState { idle, uploading, ready, executing, holding, complete, error }
 
@@ -30,7 +28,7 @@ class MissionProvider extends ChangeNotifier {
   // Upload
   // -------------------------------------------------------------------------
 
-  void uploadMission(PatrolRoute route, {required bool useMock, DroneProvider? drone}) {
+  void uploadMission(PatrolRoute route, {required bool useMock, GcsClientProvider? gcs, DroneProvider? drone}) {
     if (!canUpload) return;
 
     state = MissionState.uploading;
@@ -38,7 +36,10 @@ class MissionProvider extends ChangeNotifier {
     statusMessage = 'Uploading mission (${route.waypoints.length} waypoints)...';
     notifyListeners();
 
-    if (useMock || drone == null) {
+    if (useMock || gcs == null) {
+      // Mock mode is purely visual and has nothing to do with the real
+      // MAVLink link — DroneProvider's mock-route helpers are kept for
+      // this regardless of which backend real flight uses.
       drone?.setMockRoute(route.waypoints);
       Future.delayed(const Duration(milliseconds: 1500), () {
         state = MissionState.ready;
@@ -48,168 +49,63 @@ class MissionProvider extends ChangeNotifier {
       return;
     }
 
-    _uploadRealMission(route, drone);
+    _uploadRealMission(route, gcs);
   }
 
   // -------------------------------------------------------------------------
-  // Real MAVLink mission upload
-  // Uses DroneProvider's existing socket via callback — no double-listening
+  // Real mission upload — via gcs_web.py's /api/mission (MISSION_COUNT /
+  // MISSION_ITEM_INT / MISSION_ACK handshake, run server-side).
   // -------------------------------------------------------------------------
 
-  List<PatrolWaypoint>? _pendingWaypoints;
-  RawDatagramSocket? _missionSocket;
-  InternetAddress? _missionHost;
-  int? _missionPort;
+  Timer? _uploadPollTimer;
 
-  void _uploadRealMission(PatrolRoute route, DroneProvider drone) {
-    final socket = drone.socket;
-    if (socket == null) {
+  Future<void> _uploadRealMission(PatrolRoute route, GcsClientProvider gcs) async {
+    final waypoints = route.waypoints.map((w) => w.toJson()).toList();
+
+    final error = await gcs.uploadMission(waypoints);
+    if (error != null) {
       state = MissionState.error;
-      statusMessage = 'Drone not connected';
+      statusMessage = error;
       notifyListeners();
+      print('[SGT] Mission upload rejected: $error');
       return;
     }
 
-    _missionSocket = socket;
-    _missionHost = InternetAddress(drone.px4Host);
-    _missionPort = drone.px4Port;
-    _pendingWaypoints = route.waypoints;
-
-    // Register callback on DroneProvider to receive mission protocol messages
-    drone.onMissionMessage = _handleMissionMessage;
-
-    // Step 1 — tell PX4 how many waypoints (+1 for home)
-    _sendMissionCount(route.waypoints.length + 1);
-    statusMessage = 'Sending waypoint count to PX4...';
+    statusMessage = 'Sending waypoint count...';
     notifyListeners();
     print('[SGT] Mission upload started — ${route.waypoints.length} waypoints');
-  }
 
-  void _handleMissionMessage(MavlinkFrame frame) {
-    final message = frame.message;
-    print('[SGT] Mission message received: ${message.runtimeType}');//debug
-    final waypoints = _pendingWaypoints;
-    if (waypoints == null) return;
+    // gcs_web.py runs the handshake in a background thread and reports
+    // progress through routeMissionState/routeMissionMessage, refreshed
+    // by GcsClientProvider's normal 500ms status poll. Watch it here
+    // until it settles rather than re-implementing the handshake client
+    // side.
+    _uploadPollTimer?.cancel();
+    _uploadPollTimer = Timer.periodic(const Duration(milliseconds: 300), (t) {
+      statusMessage = gcs.routeMissionMessage;
+      currentWaypoint = gcs.routeMissionCurrentWp;
 
-    // PX4 requests each waypoint individually
-    if (message is MissionRequestInt) {
-      final seq = message.seq;
-      print('[SGT] PX4 requesting waypoint $seq');
-      statusMessage = 'Sending waypoint $seq / ${waypoints.length}...';
-      notifyListeners();
-      _sendWaypointForSeq(seq, waypoints);
-    }
-
-    // Legacy request format
-    else if (message is MissionRequest) {
-      final seq = message.seq;
-      _sendWaypointForSeq(seq, waypoints);
-    }
-
-    // PX4 acknowledges complete mission
-    else if (message is MissionAck) {
-      if (message.type == mavMissionAccepted) {
+      if (gcs.routeMissionState == 'ready') {
+        t.cancel();
         state = MissionState.ready;
-        statusMessage = 'Mission ready — ${waypoints.length} waypoints uploaded';
-        print('[SGT] Mission accepted by PX4');
-      } else {
+        print('[SGT] Mission accepted by FC');
+        notifyListeners();
+      } else if (gcs.routeMissionState == 'error') {
+        t.cancel();
         state = MissionState.error;
-        statusMessage = 'Mission upload failed (error: ${message.type})';
-        print('[SGT] Mission rejected: ${message.type}');
-      }
-      notifyListeners();
-    }
-
-    // Mission item reached during execution
-    else if (message is MissionItemReached) {
-      print('[SGT] MissionItemReached: seq=${message.seq}'); //debug
-      currentWaypoint = message.seq;
-      statusMessage = 'Patrolling: waypoint $currentWaypoint / $totalWaypoints';
-      notifyListeners();
-      print('[SGT] Reached waypoint $currentWaypoint');
-
-      if (currentWaypoint >= totalWaypoints) {
-        state = MissionState.complete;
-        statusMessage = 'Patrol complete';
+        print('[SGT] Mission rejected: ${gcs.routeMissionError}');
+        notifyListeners();
+      } else {
         notifyListeners();
       }
-    }
-  }
-
-  void _sendWaypointForSeq(int seq, List<PatrolWaypoint> waypoints) {
-    if (seq == 0) {
-      _sendHomeWaypoint();
-    } else if (seq <= waypoints.length) {
-      _sendWaypoint(seq, waypoints[seq - 1]);
-    }
-  }
-
-  void _sendMissionCount(int count) {
-    if (_missionSocket == null || _missionHost == null || _missionPort == null) return;
-    final message = MissionCount(
-      targetSystem: 1,
-      targetComponent: 1,
-      count: count,
-      missionType: mavMissionTypeMission,
-      opaqueId: 0,
-    );
-    final frame = MavlinkFrame.v2(0, 255, 0, message);
-    _missionSocket!.send(frame.serialize(), _missionHost!, _missionPort!);
-  }
-
-  void _sendHomeWaypoint() {
-    if (_missionSocket == null || _missionHost == null || _missionPort == null) return;
-    final message = MissionItemInt(
-      targetSystem: 1,
-      targetComponent: 1,
-      seq: 0,
-      frame: mavFrameGlobal,
-      command: mavCmdNavWaypoint,
-      current: 0,
-      autocontinue: 1,
-      param1: 0,
-      param2: 0,
-      param3: 0,
-      param4: 0,
-      x: 0,
-      y: 0,
-      z: 0,
-      missionType: mavMissionTypeMission,
-    );
-    final frame = MavlinkFrame.v2(0, 255, 0, message);
-    _missionSocket!.send(frame.serialize(), _missionHost!, _missionPort!);
-    print('[SGT] Sent home waypoint (seq 0)');
-  }
-
-  void _sendWaypoint(int seq, PatrolWaypoint wp) {
-    if (_missionSocket == null || _missionHost == null || _missionPort == null) return;
-    final message = MissionItemInt(
-      targetSystem: 1,
-      targetComponent: 1,
-      seq: seq,
-      frame: mavFrameGlobalRelativeAlt,
-      command: mavCmdNavWaypoint,
-      current: seq == 1 ? 1 : 0,
-      autocontinue: 1,
-      param1: wp.hoverSeconds.toDouble(),
-      param2: 2.0,
-      param3: 0,
-      param4: double.nan,
-      x: (wp.latitude * 1e7).toInt(),
-      y: (wp.longitude * 1e7).toInt(),
-      z: wp.altitude,
-      missionType: mavMissionTypeMission,
-    );
-    final frame = MavlinkFrame.v2(0, 255, 0, message);
-    _missionSocket!.send(frame.serialize(), _missionHost!, _missionPort!);
-    print('[SGT] Sent waypoint $seq: ${wp.latitude}, ${wp.longitude} at ${wp.altitude}m');
+    });
   }
 
   // -------------------------------------------------------------------------
   // Start mission
   // -------------------------------------------------------------------------
 
-  void startMission({required bool useMock, DroneProvider? drone}) {
+  void startMission({required bool useMock, GcsClientProvider? gcs, DroneProvider? drone}) {
     if (!canStart) return;
 
     state = MissionState.executing;
@@ -217,49 +113,47 @@ class MissionProvider extends ChangeNotifier {
     statusMessage = 'Arming drone...';
     notifyListeners();
 
-    if (useMock || drone == null) {
+    if (useMock || gcs == null) {
       _mockDrone = drone;
       drone?.resumeMockRoute();
       _simulateProgress();
       return;
     }
 
-    _startRealMission(drone);
+    _startRealMission(gcs);
   }
 
-  void _startRealMission(DroneProvider drone) {
-    final socket = drone.socket;
-    if (socket == null) return;
-
-    final host = InternetAddress(drone.px4Host);
-    final port = drone.px4Port;
-
-    // Arm drone
-    drone.arm();
+  Future<void> _startRealMission(GcsClientProvider gcs) async {
     statusMessage = 'Arming...';
     notifyListeners();
 
-    // Send mission start after arming
-    Future.delayed(const Duration(seconds: 2), () {
-      final message = CommandLong(
-        targetSystem: 1,
-        targetComponent: 1,
-        command: mavCmdMissionStart,
-        confirmation: 0,
-        param1: 0,
-        param2: 0,
-        param3: 0,
-        param4: 0,
-        param5: 0,
-        param6: 0,
-        param7: 0,
-      );
-      final frame = MavlinkFrame.v2(0, 255, 0, message);
-      socket.send(frame.serialize(), host, port);
-      statusMessage = 'Mission executing...';
+    final armError = await gcs.arm();
+    if (armError != null) {
+      state = MissionState.error;
+      statusMessage = armError;
       notifyListeners();
-      print('[SGT] Mission start sent');
-    });
+      print('[SGT] Arm failed: $armError');
+      return;
+    }
+
+    // gcs_web.py's /api/mission/start itself requires armed=true and
+    // switches the vehicle to AUTO — ArduCopter won't run a mission in
+    // any other mode. Give the ARM command a moment to actually land
+    // before checking, same margin the old PX4 path used.
+    await Future.delayed(const Duration(seconds: 2));
+
+    final startError = await gcs.startMission();
+    if (startError != null) {
+      state = MissionState.error;
+      statusMessage = startError;
+      notifyListeners();
+      print('[SGT] Mission start failed: $startError');
+      return;
+    }
+
+    statusMessage = 'Mission executing...';
+    notifyListeners();
+    print('[SGT] Mission start sent');
   }
 
   // -------------------------------------------------------------------------
@@ -281,6 +175,7 @@ class MissionProvider extends ChangeNotifier {
     double alt = 20.0,
     Duration duration = const Duration(seconds: 15),
     required bool useMock,
+    GcsClientProvider? gcs,
     DroneProvider? drone,
   }) {
     if (isPanicHold) return; // panic always takes priority
@@ -291,9 +186,13 @@ class MissionProvider extends ChangeNotifier {
     notifyListeners();
     print('[SGT] Holding at $lat, $lng for ${duration.inSeconds}s');
 
+    // Map-marker cosmetics only — unrelated to which backend flies the
+    // vehicle, so this stays on DroneProvider regardless of useMock.
     drone?.setFocusPoint(lat: lat, lng: lng, reason: 'Investigating');
-    if (!useMock && drone != null) {
-      drone.reposition(lat: lat, lng: lng, alt: alt);
+    if (!useMock && gcs != null) {
+      gcs.goTo(lat: lat, lon: lng, altMeters: alt).then((error) {
+        if (error != null) print('[SGT] Hold reposition failed: $error');
+      });
     }
 
     _holdTimer?.cancel();
@@ -323,9 +222,11 @@ class MissionProvider extends ChangeNotifier {
     required double lng,
     double alt = 20.0,
     required bool useMock,
+    GcsClientProvider? gcs,
     DroneProvider? drone,
   }) {
     _holdTimer?.cancel(); // cancel any in-progress investigate hold — panic overrides it
+    _uploadPollTimer?.cancel(); // panic overrides an in-progress mission upload watch too
 
     // Only remember "what to resume" if we're not already mid-panic —
     // otherwise a second panic trigger while already responding would
@@ -344,8 +245,16 @@ class MissionProvider extends ChangeNotifier {
     print('[SGT] Panic dispatch: holding at $lat, $lng indefinitely');
 
     drone?.setFocusPoint(lat: lat, lng: lng, reason: 'PANIC');
-    if (!useMock && drone != null) {
-      drone.reposition(lat: lat, lng: lng, alt: alt);
+    if (!useMock && gcs != null) {
+      // gcs_web.py's own /api/dispatch already runs the full
+      // arm/transit/standoff/observe sequence for panic — that's what
+      // the panic button itself calls (see remote_alert_panel.dart /
+      // GcsClientProvider.dispatch()). This path is for MissionProvider
+      // driving a panic hold directly, so a plain goTo is the right
+      // equivalent to the old reposition() call it replaces.
+      gcs.goTo(lat: lat, lon: lng, altMeters: alt).then((error) {
+        if (error != null) print('[SGT] Panic reposition failed: $error');
+      });
     }
   }
 
@@ -367,7 +276,7 @@ class MissionProvider extends ChangeNotifier {
   // Stop mission
   // -------------------------------------------------------------------------
 
-  void stopMission({required bool useMock, DroneProvider? drone}) {
+  void stopMission({required bool useMock, GcsClientProvider? gcs, DroneProvider? drone}) {
     if (!canStop) return;
 
     _progressTimer?.cancel();
@@ -378,10 +287,9 @@ class MissionProvider extends ChangeNotifier {
 
     if (useMock) {
       drone?.pauseMockRoute();
-    } else if (drone != null) {
-      drone.onMissionMessage = null;
-      drone.returnToHome((success, message) {
-        print('[SGT] RTH after stop: $message');
+    } else if (gcs != null) {
+      gcs.setMode('RTL').then((error) {
+        print('[SGT] RTH after stop: ${error ?? "sent"}');
       });
     }
   }
@@ -420,6 +328,7 @@ class MissionProvider extends ChangeNotifier {
   void dispose() {
     _progressTimer?.cancel();
     _holdTimer?.cancel();
+    _uploadPollTimer?.cancel();
     super.dispose();
   }
 }
